@@ -293,7 +293,7 @@ public sealed class GameSnapshot
             if (_liveSkills is not null) return _liveSkills;
             _reader.TryReadStruct<nint>(_ingameDataAddress + KnownOffsets.IngameData.ServerData, out var serverData);
             var actor = Player?.ActorComponentAddress ?? 0;
-            return _liveSkills = new LiveSkillsView(_reader, serverData, actor);
+            return _liveSkills = new LiveSkillsView(this, serverData, actor);
         }
     }
 

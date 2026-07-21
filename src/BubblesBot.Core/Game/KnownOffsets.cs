@@ -210,7 +210,7 @@ public static class KnownOffsets
         public const int ActionPtr              = 0x1B0; // unverified
         public const int ActionId               = 0x218; // unverified â€” Int16
         public const int AnimationId            = 0x248; // unverified â€” Int32
-        public const int ActorSkillsArray       = 0x6F0; // unverified â€” NativePtrArray
+        public const int ActorSkillsArray       = 0x6F0; // validated 2026-07-21 - NativePtrArray of ActorSkill pointers
         public const int ActorSkillsCooldownArray = 0x708; // ✓ validated 2026-05-07 — NativePtrArray of ActorSkillCooldown
         public const int ActorVaalSkills        = 0x720; // unverified â€” NativePtrArray
         public const int DeployedObjectArray    = 0x740; // unverified â€” StdVector
@@ -222,6 +222,17 @@ public static class KnownOffsets
         public const int CastType           = 0xC;    // unverified â€” Byte
         public const int SubData            = 0x10;   // unverified â€” SubActorSkillOffsets
         public const int Id                 = 0x50;   // ✓ validated 2026-05-07 — UInt16 (gem id; matches ActorSkillCooldown.SkillId)
+        public const int EffectsPerLevel    = 0x58;   // validated 2026-07-21 - GrantedEffectsPerLevel pointer
+    }
+
+    public static class GrantedEffectsPerLevel
+    {
+        public const int SkillGemWrapper    = 0x0;    // validated 2026-07-21 - packed skill-gem data row pointer
+    }
+
+    public static class SkillGemWrapper
+    {
+        public const int InternalName       = 0x0;    // validated 2026-07-21 - UTF-16 pointer (e.g. ShieldCharge)
     }
 
     public static class ActorSkillCooldown

@@ -35,6 +35,7 @@ interface Props {
 export function SkillsEditor({ value, onChange }: Props) {
   const profile: SlotProfile<SkillSlot> = value ?? { slots: [] };
   const slots = profile.slots ?? [];
+  const liveSkills = useStatusStore((state) => state.status?.liveSkills ?? []);
   const [showDetected, setShowDetected] = useState(false);
 
   const setSlots = (next: SkillSlot[]) => onChange({ ...profile, slots: next });
@@ -42,22 +43,19 @@ export function SkillsEditor({ value, onChange }: Props) {
     setSlots(slots.map((slot, i) => (i === index ? { ...slot, ...patch } : slot)));
 
   const importDetected = (entry: LiveSkill) => {
-    const def = SLOT_DEFAULT_KEY[entry.barSlot] ?? { vk: 0, label: "" };
-    const name = entry.name?.length ? entry.name : def.label ? `${def.label} skill` : `Skill ${entry.barSlot}`;
-    setSlots([
-      ...slots,
-      {
-        name,
-        vk: def.vk,
-        role: 0,
-        canCrossGaps: false,
-        minCastIntervalMs: 100,
-        maxRangeGrid: 30,
-        chargeCount: Math.max(1, entry.maxUses || 1),
-        chargeRechargeMs: 3000,
-        gemId: entry.gemId,
-      },
-    ]);
+    setSlots([...slots, detectedSlot(entry, 0)]);
+  };
+
+  const useCurrentHotbar = () => {
+    const visible = liveSkills.filter((entry) => entry.barSlot < SLOT_DEFAULT_KEY.length);
+    const keyboardMove = [...visible].reverse().findIndex((entry) =>
+      isMoveOnly(entry.name) && (SLOT_DEFAULT_KEY[entry.barSlot]?.vk ?? 0) > 0x06);
+    const reversedMovementIndex = keyboardMove >= 0 ? visible.length - 1 - keyboardMove : -1;
+    const movementIndex = reversedMovementIndex >= 0
+      ? reversedMovementIndex
+      : visible.findIndex((entry) => isMoveOnly(entry.name));
+    setSlots(visible.map((entry, index) => detectedSlot(entry, index === movementIndex ? 1 : 0)));
+    setShowDetected(false);
   };
 
   const movementCount = slots.filter((slot) => Number(slot.role) === 1).length;
@@ -88,12 +86,17 @@ export function SkillsEditor({ value, onChange }: Props) {
       </div>
       {showDetected && (
         <DetectedSkillsPanel
-          importedGemIds={new Set(slots.map((slot) => Number(slot.gemId)).filter(Boolean))}
+          importedGemIds={new Set(slots
+            .filter((slot) => Number(slot.gemId) > 0)
+            .map((slot) => `${Number(slot.gemId)}:${Number(slot.vk)}`))}
           onImport={importDetected}
           onClose={() => setShowDetected(false)}
         />
       )}
       <div className="skill-add-row">
+        <button type="button" className="skill-add primary-add" disabled={liveSkills.length === 0} onClick={useCurrentHotbar}>
+          Auto-fill from current hotbar
+        </button>
         <button type="button" className="skill-add primary-add" onClick={() => setShowDetected(true)}>+ Import detected skill</button>
         <button
           type="button"
@@ -107,8 +110,31 @@ export function SkillsEditor({ value, onChange }: Props) {
           + Add manually
         </button>
       </div>
+      <p className="desc skill-detection-note">
+        Auto-fill replaces these rows with the eight visible PoE bindings. Names, keys, and live skill IDs are detected automatically;
+        only Move only is assigned a purpose automatically, so combat behavior stays opt-in.
+      </p>
     </div>
   );
+}
+
+function detectedSlot(entry: LiveSkill, role: number): SkillSlot {
+  const def = SLOT_DEFAULT_KEY[entry.barSlot] ?? { vk: 0, label: "" };
+  return {
+    name: entry.name?.length ? entry.name : def.label ? `${def.label} skill` : `Unknown skill`,
+    vk: def.vk,
+    role,
+    canCrossGaps: false,
+    minCastIntervalMs: 100,
+    maxRangeGrid: 30,
+    chargeCount: Math.max(1, entry.maxUses || 1),
+    chargeRechargeMs: 3000,
+    gemId: entry.gemId,
+  };
+}
+
+function isMoveOnly(name: string | undefined): boolean {
+  return !!name && /^(move|move only|walk)$/i.test(name.trim());
 }
 
 function SkillRow({ slot, onPatch, onRemove }: {
@@ -180,7 +206,7 @@ export function NumField({ label, value, onChange, float = false }: {
 }
 
 function DetectedSkillsPanel({ importedGemIds, onImport, onClose }: {
-  importedGemIds: Set<number>;
+  importedGemIds: Set<string>;
   onImport: (entry: LiveSkill) => void;
   onClose: () => void;
 }) {
@@ -215,7 +241,7 @@ function DetectedSkillsPanel({ importedGemIds, onImport, onClose }: {
 
 function DetectedGrid({ entries, importedGemIds, onImport }: {
   entries: LiveSkill[];
-  importedGemIds: Set<number>;
+  importedGemIds: Set<string>;
   onImport: (entry: LiveSkill) => void;
 }) {
   return (
@@ -223,13 +249,13 @@ function DetectedGrid({ entries, importedGemIds, onImport }: {
       {entries.map((entry) => {
         const def = SLOT_DEFAULT_KEY[entry.barSlot];
         const keyLabel = def?.label ?? `slot ${entry.barSlot}`;
-        const name = entry.name || `Skill #${entry.gemId}`;
-        const imported = importedGemIds.has(Number(entry.gemId));
+        const name = entry.name || "Unknown skill";
+        const imported = importedGemIds.has(`${entry.gemId}:${def?.vk ?? 0}`);
         return (
           <div className="detected-card" key={`${entry.barSlot}:${entry.gemId}`}>
             <div className="d-key">{keyLabel}</div>
             <div className="d-name">{name} <span className={`d-ready ${entry.isReady ? "good" : "warn"}`}>{entry.isReady ? "ready" : "busy"}</span></div>
-            <div className="d-meta">gem {entry.gemId}{entry.maxUses ? ` / ${entry.maxUses} uses` : ""}</div>
+            <div className="d-meta">Detected from PoE{entry.maxUses ? ` / ${entry.maxUses} uses` : ""}</div>
             {imported ? <span className="d-imported">Imported</span> : <button type="button" className="d-import" onClick={() => onImport(entry)}>+ Import</button>}
           </div>
         );
