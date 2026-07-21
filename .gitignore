@@ -45,6 +45,8 @@ dumps/
 *.raw
 *.mem
 *.core
+# On case-insensitive filesystems, *.core also matches the BubblesBot.Core source directory.
+!src/BubblesBot.Core/
 /config.json
 /settings.json
 
