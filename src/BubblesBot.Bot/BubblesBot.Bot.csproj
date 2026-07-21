@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The WebUI folder is a Vite app; only its build output (wwwroot) belongs to msbuild. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);WebUI\node_modules\**;WebUI\src\**;WebUI\index.html;WebUI\*.json;WebUI\*.ts;WebUI\*.md</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BubblesBot.Core\BubblesBot.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct2D1" Version="3.*" />
+  </ItemGroup>
+
+  <!-- Copy the web UI assets into the build output so the embedded server can serve them. -->
+  <ItemGroup>
+    <Content Include="WebUI\wwwroot\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    Opt-in front-end rebuild: `dotnet build -p:BuildWebUi=true` refreshes WebUI/wwwroot from
+    the Vite sources. Plain `dotnet build` never requires Node — the built bundle is committed
+    so clone → dotnet run just works.
+  -->
+  <Target Name="BuildWebUi" BeforeTargets="BeforeBuild" Condition="'$(BuildWebUi)' == 'true'">
+    <Exec Command="npm ci" WorkingDirectory="WebUI" Condition="!Exists('WebUI\node_modules')" />
+    <Exec Command="npm run build" WorkingDirectory="WebUI" />
+  </Target>
+
+</Project>

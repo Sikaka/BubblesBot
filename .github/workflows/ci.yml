@@ -1,0 +1,31 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Privacy check
+        shell: pwsh
+        run: ./eng/privacy-check.ps1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore BubblesBot.slnx
+      - name: Build
+        run: dotnet build BubblesBot.slnx --configuration Release --no-restore
+      - name: Test
+        run: dotnet test tests/BubblesBot.Tests/BubblesBot.Tests.csproj --configuration Release --no-build --no-restore --logger "trx;LogFileName=tests.trx" --results-directory artifacts/test-results
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: error

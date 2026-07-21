@@ -1,0 +1,7 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+.githooks/* text eol=lf
+
+# Vite build output committed so clone → dotnet run works without Node.
+# Rebuild with: dotnet build -p:BuildWebUi=true (or npm run build in WebUI/).
+src/BubblesBot.Bot/WebUI/wwwroot/** linguist-generated -diff

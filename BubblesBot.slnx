@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BubblesBot.Core/BubblesBot.Core.csproj" />
+    <Project Path="src/BubblesBot.Bot/BubblesBot.Bot.csproj" />
+    <Project Path="src/BubblesBot.Research/BubblesBot.Research.csproj" />
+    <Project Path="src/BubblesBot.Replay/BubblesBot.Replay.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BubblesBot.Tests/BubblesBot.Tests.csproj" />
+  </Folder>
+</Solution>
