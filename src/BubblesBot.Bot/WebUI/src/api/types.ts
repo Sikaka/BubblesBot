@@ -114,8 +114,18 @@ export interface RunTimer {
   limitMinutes: number;
 }
 
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion?: string | null;
+  updateAvailable: boolean;
+  releaseUrl?: string | null;
+  state: "checking" | "current" | "available" | "no-release" | "unavailable";
+  checkedAtUtc?: string | null;
+}
+
 /** The 10 Hz status payload. Only the fields the UI consumes are typed. */
 export interface BotStatus {
+  update?: UpdateInfo;
   connected: boolean;
   stateLabel: string;
   foreground?: boolean;

@@ -4,6 +4,7 @@ using BubblesBot.Bot.Modes;
 using BubblesBot.Bot.Overlay;
 using BubblesBot.Bot.Overlay.Native;
 using BubblesBot.Bot.Settings;
+using BubblesBot.Bot.Updates;
 using BubblesBot.Bot.Web;
 using BubblesBot.Core;
 using BubblesBot.Core.Game;
@@ -85,6 +86,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     private readonly Systems.LootLedger _lootLedger = new();
     private readonly Diagnostics.RunReportStore _runReports = new();
     private readonly Systems.BotRunTimer _runTimer = new();
+    private readonly GitHubReleaseUpdateChecker _updates = new();
     private Systems.BotRunTimerState _runTimerState;
 
     // Game-state gate. Read at render rate (a handful of pointer reads); the world block
@@ -168,6 +170,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         Behaviors.Loot.LootClosestVisible.SharedValueFilter =
             new Behaviors.Loot.ValueFilter(_priceCatalog);
         Behaviors.Loot.LootClosestVisible.SharedLedger = _lootLedger;
+        _updates.RefreshIfDue();
         _web.Start();
     }
 
@@ -320,6 +323,8 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     /// <summary>Snapshot of live runtime state shipped to the web UI over WebSocket.</summary>
     private object BuildStatus()
     {
+        _updates.RefreshIfDue();
+        var update = _updates.Snapshot;
         var snap = _currentSnapshot;
         var player = snap?.Player;
 
@@ -468,6 +473,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
 
         return new
         {
+            update,
             connected     = snap is not null,
             loop,
             mechanic,
@@ -842,6 +848,11 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         var hud = new List<string>((modeHud?.Count ?? 0) + 1);
         if (modeHud is not null) hud.AddRange(modeHud);
         hud.Add($"Profit: {profit.TotalChaos:F1}c | {profit.ChaosPerHour:F1}c/h | {profit.Pickups} pickups");
+        _updates.RefreshIfDue();
+        var update = _updates.Snapshot;
+        var updateWarning = update.UpdateAvailable
+            ? $"UPDATE AVAILABLE: {update.LatestVersion}"
+            : null;
 
         // Campaign guidance: read the worker's latest snapshot lock-free, then re-walk each target's
         // flow field from the LIVE player cell this frame (cheap, O(path)) so routes track smoothly.
@@ -872,6 +883,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             Hud:            hud,
             Guidance:       guidanceSnap,
             GuidanceRoutes: guidanceRoutes,
+            UpdateWarning:  updateWarning,
             HpBars:         _settings.Current.ShowEntityHpBars,
             PlayerBlip:     _settings.Current.ShowMapPlayerBlip);
         _renderer.Render(ctx);

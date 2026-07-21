@@ -176,6 +176,7 @@ public sealed class OverlayRenderer : IDisposable
             DrawUniqueValueLabels(rt, ctx);
             DrawTargetBox(rt, ctx);
             DrawHudPanel(rt, ctx);
+            DrawUpdateWarning(rt, ctx);
             DrawGuidanceHud(rt, ctx);
         }
         finally
@@ -1132,6 +1133,17 @@ public sealed class OverlayRenderer : IDisposable
         if (modeLines is not null)
             foreach (var line in modeLines)
                 Text(rt, line, _tfNormal!, _bDim!, x + padX, y + padY + lineH * row++, w - padX * 2, lineH);
+    }
+
+    /// <summary>Small, non-interactive release notice above the normal status panel.</summary>
+    private void DrawUpdateWarning(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (string.IsNullOrWhiteSpace(ctx.UpdateWarning)) return;
+
+        const float x = 12f, y = 232f, w = 360f, h = 22f, padX = 8f;
+        FillRect(rt, x, y, w, h, _bPanel!);
+        DrawRect(rt, x, y, w, h, _bGround!, 1f);
+        Text(rt, ctx.UpdateWarning, _tfSmall!, _bGround!, x + padX, y + 3f, w - padX * 2, h - 4f);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────

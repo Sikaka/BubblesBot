@@ -1,0 +1,94 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Privacy check
+        shell: pwsh
+        run: ./eng/privacy-check.ps1
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/BubblesBot.Bot/WebUI/package-lock.json
+
+      - name: Validate version tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH (for example, v1.2.0)."
+          }
+          "version=$($Matches.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Build web UI
+        working-directory: src/BubblesBot.Bot/WebUI
+        run: |
+          npm ci
+          npm run build
+
+      - name: Restore
+        run: dotnet restore BubblesBot.slnx
+
+      - name: Test
+        run: dotnet test tests/BubblesBot.Tests/BubblesBot.Tests.csproj --configuration Release --no-restore
+
+      - name: Restore Windows release runtime
+        run: dotnet restore src/BubblesBot.Bot/BubblesBot.Bot.csproj --runtime win-x64
+
+      - name: Publish self-contained executable
+        shell: pwsh
+        run: |
+          dotnet publish src/BubblesBot.Bot/BubblesBot.Bot.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --no-restore `
+            --output artifacts/release/win-x64 `
+            -p:Version=${{ steps.version.outputs.version }} `
+            -p:InformationalVersion=${{ steps.version.outputs.version }} `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false
+
+          $files = @(Get-ChildItem artifacts/release/win-x64 -File)
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'BubblesBot.exe') {
+            throw "Expected one self-contained BubblesBot.exe; found: $($files.Name -join ', ')"
+          }
+
+          $hash = (Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  BubblesBot.exe" | Set-Content artifacts/release/BubblesBot.exe.sha256 -Encoding ascii
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            artifacts/release/win-x64/BubblesBot.exe `
+            artifacts/release/BubblesBot.exe.sha256 `
+            --verify-tag `
+            --title "BubblesBot ${{ github.ref_name }}" `
+            --generate-notes

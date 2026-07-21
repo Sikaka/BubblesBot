@@ -552,6 +552,20 @@ main { max-width: 1120px; padding: 28px 24px 100px; }
 .logic-loop strong { color: var(--text); }
 .logic-loop button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 10px; }
 
+.update-notice {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  margin-bottom: 14px; padding: 13px 16px; border: 1px solid rgba(244,189,106,.45);
+  border-radius: 9px; background: rgba(244,189,106,.08);
+}
+.update-notice > div { display: flex; flex-direction: column; gap: 3px; }
+.update-notice strong { color: var(--warn); font-size: 13px; }
+.update-notice span { color: var(--text-dim); font-size: 11px; }
+.update-notice a {
+  flex: 0 0 auto; padding: 7px 10px; color: #081013; background: var(--warn);
+  border-radius: 6px; font-size: 11px; font-weight: 750; text-decoration: none;
+}
+.update-notice a:hover { filter: brightness(1.08); }
+
 .drawer { width: min(560px, 94vw); padding: 24px; }
 .drawer-head { align-items: start; }
 .drawer-head h2 { font-size: 17px; text-transform: none; color: var(--text); letter-spacing: 0; }
@@ -592,4 +606,5 @@ main { max-width: 1120px; padding: 28px 24px 100px; }
   .skill-purpose { grid-column: auto; }
   .wizard-actions { padding: 9px 12px; }
   .wizard-actions .btn-secondary:first-child { padding-inline: 9px; }
+  .update-notice { align-items: flex-start; flex-direction: column; }
 }

@@ -27,6 +27,8 @@ public sealed record RenderContext(
     GuidanceSnapshot? Guidance = null,
     // Per-frame guidance routes (player → each target), re-walked from the live player this frame.
     IReadOnlyList<GuidanceRoute>? GuidanceRoutes = null,
+    // Compact non-interactive notice when GitHub reports a newer stable release.
+    string? UpdateWarning = null,
     // Draw compact HP bars above hostile monsters (see BotSettings.ShowEntityHpBars).
     bool HpBars = false,
     // Draw the cyan player blip at map-overlay center (see BotSettings.ShowMapPlayerBlip).

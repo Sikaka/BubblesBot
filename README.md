@@ -23,3 +23,16 @@ External `.exe` that:
 3. Exposes a curated, use-case-shaped API to bot logic — not a 1:1 mirror of ExileCore.
 4. Drives input via `SendInput`.
 5. Owns its own tick loop, render overlay, and observability (web dashboard, tick recorder, replay harness).
+
+## Publishing a release
+
+Normal pushes run CI but do not publish binaries. To publish a tested, self-contained Windows executable, push an exact semantic-version tag from the repository root:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow runs the privacy check and tests, builds the web UI, publishes a single `BubblesBot.exe` for Windows x64, generates a SHA-256 checksum, and creates the GitHub Release with generated notes. Increment the tag for every release; do not reuse a published tag.
+
+Released builds check GitHub periodically. When a newer release exists, the web dashboard and in-game overlay show a small warning with the latest version; the dashboard links to the release download.

@@ -6,11 +6,13 @@ import { TreePanel } from "../components/dashboard/TreePanel";
 import { EventsPanel } from "../components/dashboard/EventsPanel";
 import { LootPanel } from "../components/dashboard/LootPanel";
 import { useStatusStore } from "../state/statusStore";
+import { UpdateNotice } from "../components/UpdateNotice";
 
 export default function DashboardPage() {
   const atlasMode = useStatusStore((s) => s.status?.activeMode === 4);
   return (
     <>
+      <UpdateNotice />
       <ArmControl />
       {atlasMode && <StrategySwitcher />}
       <section className="card">
