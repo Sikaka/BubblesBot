@@ -1,4 +1,5 @@
 using BubblesBot.Bot.Diagnostics;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Bot.Systems;
 
 namespace BubblesBot.Bot.Input;
@@ -30,6 +31,11 @@ namespace BubblesBot.Bot.Input;
 /// </summary>
 public sealed class InputRouter : IInputRouter
 {
+    private readonly Func<int> _getLatencyAllowanceMs;
+
+    public InputRouter(Func<int>? getLatencyAllowanceMs = null)
+        => _getLatencyAllowanceMs = getLatencyAllowanceMs ?? (() => 0);
+
     /// <summary>
     /// Hard floor between consecutive click dispatches. PoE needs a moment to register the
     /// click before a follow-up can land cleanly. Held keys ignore this floor — they're
@@ -277,7 +283,7 @@ public sealed class InputRouter : IInputRouter
         _settleUntil = now + TimeSpan.FromMilliseconds(PostActionSettleMs);
         // A predicate-less click can't be verified — cap its lifetime so it doesn't wedge the
         // gate for the full 1.5 s default. With a predicate, honor the caller's timeout.
-        var effectiveTimeout = expectResolved is null ? Math.Min(timeoutMs, UnverifiedTimeoutMs) : timeoutMs;
+        var effectiveTimeout = EffectiveTimeout(timeoutMs, expectResolved is not null);
         _pending = new ActionToken(actionId, description, wallNow, effectiveTimeout, expectResolved, now);
         _pending.MarkDispatched(wallNow, now);
         EmitAction(_pending, intent, "dispatched", EventSeverity.Info);
@@ -290,13 +296,18 @@ public sealed class InputRouter : IInputRouter
     {
         var wallNow = DateTime.UtcNow;
         var now = BotMonotonicClock.Now;
-        var effectiveTimeout = expectResolved is null ? Math.Min(timeoutMs, UnverifiedTimeoutMs) : timeoutMs;
+        var effectiveTimeout = EffectiveTimeout(timeoutMs, expectResolved is not null);
         _pending = new ActionToken(actionId, description, wallNow, effectiveTimeout, expectResolved, now);
         _pendingPointer = new PendingPointerAction(
             _pending, intent, kind, modifiers, now + TimeSpan.FromMilliseconds(CursorSettleMs()),
             endX, endY);
         return new InputTicket(_pending);
     }
+
+    private int EffectiveTimeout(int requestedTimeoutMs, bool verified)
+        => verified
+            ? LatencyPolicy.TimeoutMs(requestedTimeoutMs, _getLatencyAllowanceMs())
+            : Math.Min(requestedTimeoutMs, UnverifiedTimeoutMs);
 
     public void Tick()
     {
@@ -445,6 +456,7 @@ public sealed class InputRouter : IInputRouter
                 ["actionId"] = token.ActionId,
                 ["intent"] = intent?.ToString(),
                 ["outcome"] = token.Outcome.ToString(),
+                ["timeoutMs"] = token.TimeoutMs,
                 ["latencyMs"] = token.DispatchedMonotonic is { } sent && token.ResolvedMonotonic is { } resolved
                     ? (resolved - sent).TotalMilliseconds
                     : null,

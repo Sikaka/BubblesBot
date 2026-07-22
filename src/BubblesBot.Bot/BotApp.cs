@@ -53,7 +53,8 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     private readonly nint _ingameStateAddress;
     private readonly OverlayWindow _overlayWindow;
     private readonly OverlayRenderer _renderer;
-    private readonly InputRouter _input = new();
+    private readonly OverlayVisibilityToggle _overlayVisibility = new();
+    private readonly InputRouter _input;
     private readonly SettingsStore _settings = new();
     private readonly BotEnable _enable;
     private readonly LootMode _loot;
@@ -73,6 +74,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     // render path reads lock-free. See Overlay/Navigation/GuidanceWorker.
     private readonly Overlay.Navigation.GuidanceWorker _guidance;
     private readonly Diagnostics.FlightRecorder _flightRecorder = new();
+    private readonly Knowledge.AtlasMapKnowledgeObserver _atlasKnowledge = new();
     private object? _publishedStatus;
     private Diagnostics.RuntimeMetricsSnapshot _runtimeMetrics = Diagnostics.RuntimeMetricsSnapshot.Empty;
     private long _tickId;
@@ -122,6 +124,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     public BotApp(ProcessHandle process, MemoryReader reader, nint ingameDataAddress, nint ingameStateAddress,
         IReadOnlyList<nint>? theGameSlots = null)
     {
+        _input = new InputRouter(() => _settings.Current.ActionLatencyAllowanceMs);
         _process = process;
         _reader = reader;
         _ingameDataAddress = ingameDataAddress;
@@ -145,7 +148,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         _simulacrum   = new SimulacrumRunMode(_settings, _combat, () => _currentSnapshot, () => _liveCache, () => _entities);
         _guardianRota = new GuardianRotaRunMode(_settings, _combat, () => _currentSnapshot, () => _liveCache, () => _entities);
         _mapRun       = new MapRunMode(_settings, _combat, _strategies, () => _currentSnapshot, () => _liveCache, () => _entities,
-            _runReports, () => _lootLedger.Snapshot());
+            _runReports, () => _lootLedger.Snapshot(), _atlasKnowledge);
         _profiles = new ProfileStore(_settings);
         // The active strategy id is per-character, so it changes when ProfileStore swaps profiles
         // on login. Keep the published active strategy in sync with whatever the current profile
@@ -521,6 +524,8 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             openPanels,
             worldBlocked,
             inputState    = _input.GateState,
+            actionLatencyAllowanceMs = _settings.Current.ActionLatencyAllowanceMs,
+            overlayVisible = _overlayVisibility.IsVisible,
             mode          = modeName,
             modeDecision,
             runId = ActiveRunId(),
@@ -688,6 +693,15 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         _enable.Tick(_gameHwnd,
             gateAvailable: kind != GameStateKind.GateDisabled,
             gameStateAllowsInput: kind == GameStateKind.InGame);
+        var overlayToggleDown = _enable.ForegroundOk
+            && (OverlayNative.GetAsyncKeyState(OverlayVisibilityToggle.VirtualKey) & 0x8000) != 0;
+        if (_overlayVisibility.Observe(overlayToggleDown))
+        {
+            _overlayWindow.SetVisible(_overlayVisibility.IsVisible);
+            Diagnostics.EventLog.Emit(
+                "overlay", "overlay.visibility-toggled", Diagnostics.EventSeverity.Info,
+                _overlayVisibility.IsVisible ? "overlay shown (F12)" : "overlay hidden (F12)");
+        }
         Systems.BotMonotonicClock.SetPaused(!_enable.ShouldAct);
         var automationArmed = _settings.Current.BotActive;
         if (_lastAutomationArmed == true && !automationArmed
@@ -787,6 +801,11 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
 
             // Mode dispatch — Loot is the only mode that requires holding the loot key.
             // All other modes run on ShouldAct alone.
+            // Passive atlas documentation is independent of automation state. A human playing
+            // with only the overlay enabled still teaches typed transitions, terrain signatures,
+            // and post-transition unique-boss identities to the local knowledge store.
+            _atlasKnowledge.Observe(_currentSnapshot, _entities);
+
             if (_enable.ShouldAct)
             {
                 // Death gate — runs ABOVE mode dispatch. While the resurrect panel is up we click
@@ -908,7 +927,8 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             UpdateWarning:  updateWarning,
             HpBars:         _settings.Current.ShowEntityHpBars,
             PlayerBlip:     _settings.Current.ShowMapPlayerBlip);
-        _renderer.Render(ctx);
+        if (_overlayVisibility.IsVisible)
+            _renderer.Render(ctx);
 
         var tickDurationMs = Stopwatch.GetElapsedTime(tickStarted).TotalMilliseconds;
         _runtimeMetrics = new Diagnostics.RuntimeMetricsSnapshot(

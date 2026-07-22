@@ -49,4 +49,20 @@ public sealed class AreaTransitionTrackerTests
 
         Assert.Equal(AreaTransitionOutcome.TimedOut, state.Outcome);
     }
+
+    [Fact]
+    public void AdditionalEvidenceTime_ExtendsOnlyTheUnknownDestinationDeadline()
+    {
+        var tracker = new AreaTransitionTracker(TimeSpan.FromSeconds(5));
+        tracker.Start(10, AreaRole.Map, AreaRole.SafeHub, TimeSpan.Zero);
+        tracker.Observe(20, AreaRole.Unknown, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3));
+
+        var stillWaiting = tracker.Observe(
+            20, AreaRole.Unknown, TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(3));
+        var timedOut = tracker.Observe(
+            20, AreaRole.Unknown, TimeSpan.FromSeconds(9), TimeSpan.FromSeconds(3));
+
+        Assert.Equal(AreaTransitionOutcome.VerifyingDestination, stillWaiting.Outcome);
+        Assert.Equal(AreaTransitionOutcome.TimedOut, timedOut.Outcome);
+    }
 }

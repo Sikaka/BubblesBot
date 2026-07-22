@@ -1,5 +1,6 @@
 using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Input;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Snapshot;
 
@@ -67,7 +68,9 @@ public sealed class BossCheckpointPortalSystem
             return BehaviorStatus.Success;
         }
 
-        if (_attempts >= MaxAttempts || (now - _startedAt).TotalSeconds >= TimeoutSeconds)
+        var maxAttempts = LatencyPolicy.RetryLimit(MaxAttempts, ctx.Settings);
+        if (_attempts >= maxAttempts || (now - _startedAt).TotalSeconds
+            >= LatencyPolicy.TimeoutSeconds(TimeoutSeconds, ctx.Settings))
         {
             IsFailed = true;
             Status = $"boss checkpoint portal unavailable after {_attempts} attempts";
@@ -100,7 +103,7 @@ public sealed class BossCheckpointPortalSystem
         {
             _attempts++;
             _lastActionAt = now;
-            Status = $"placing boss checkpoint portal ({_attempts}/{MaxAttempts})";
+            Status = $"placing boss checkpoint portal ({_attempts}/{maxAttempts})";
         }
         return BehaviorStatus.Running;
     }

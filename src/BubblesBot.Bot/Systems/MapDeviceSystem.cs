@@ -224,7 +224,7 @@ public sealed class MapDeviceSystem
             Phase.EnterPortal => PortalEntryTimeoutSec,
             _ => PhaseTimeoutSeconds,
         };
-        if (phaseAge > timeout)
+        if (phaseAge > LatencyPolicy.TimeoutSeconds(timeout, ctx.Settings))
         {
             return Fail($"timeout in {CurrentPhase} after {phaseAge:F0}s — last status: {Status}");
         }
@@ -353,8 +353,8 @@ public sealed class MapDeviceSystem
             return Advance(Phase.SelectMap, "device open — selecting map");
         }
 
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"failed to open device after {MaxClickAttempts} clicks");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to open device after {MaxClickAttemptsFor(ctx)} clicks");
 
         // Click the device entity. Resolve its bounds-projected screen point via the same
         // path InteractWorldEntity uses (re-implemented inline here to keep this system
@@ -373,7 +373,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"clicked device ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"clicked device ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Log("MapDevice", $"open click sent abs=({clickPoint.Value.X},{clickPoint.Value.Y})");
         }
         return Result.InProgress;
@@ -436,8 +436,8 @@ public sealed class MapDeviceSystem
             return Result.InProgress;
         }
 
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"failed to stage map after {MaxClickAttempts} ctrl+clicks");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to stage map after {MaxClickAttemptsFor(ctx)} ctrl+clicks");
 
         var slotIndex = ctx.Settings.BlightStorageSlotIndex;
         var stored = atlas.StoredItems();
@@ -477,7 +477,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"ctrl+clicked storage[{target.Value.Index}] ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"ctrl+clicked storage[{target.Value.Index}] ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Log("MapDevice", $"insert Ctrl+click sent at ({sx},{sy}) idx={target.Value.Index}");
         }
         return Result.InProgress;
@@ -491,8 +491,8 @@ public sealed class MapDeviceSystem
             Status = $"{selectionError}; waiting to return staged map";
             return Result.InProgress;
         }
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"{selectionError}; failed to return staged map after {MaxClickAttempts} attempts");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"{selectionError}; failed to return staged map after {MaxClickAttemptsFor(ctx)} attempts");
         if (atlas.DeviceSlot(0) is not { Rect: { } rect, IsOccupied: true })
             return Result.InProgress;
 
@@ -506,7 +506,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"{selectionError}; returning staged map ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"{selectionError}; returning staged map ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             Diagnostics.EventLog.Emit(
                 "MapDevice", "map-device.wrong-node-map-returned",
                 Diagnostics.EventSeverity.Warning, Status);
@@ -523,8 +523,8 @@ public sealed class MapDeviceSystem
         // parsed). An unsupported node name fails closed rather than clicking blindly.
         if (!AtlasNodeCatalog.TryGetDataIndex(nodeName, out var dataIndex))
             return Fail($"atlas node '{nodeName}' is not in this build's node catalog (supported: {string.Join(", ", AtlasNodeCatalog.SupportedNames)})");
-        if (_nodeClickAttempts >= MaxClickAttempts)
-            return Fail($"failed to select '{nodeName}' after {MaxClickAttempts} clicks");
+        if (_nodeClickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to select '{nodeName}' after {MaxClickAttemptsFor(ctx)} clicks");
         if ((BotMonotonicClock.Now - _lastActionAt).TotalMilliseconds < InsertSettleMs)
         {
             Status = "waiting for atlas node selection to settle";
@@ -617,7 +617,7 @@ public sealed class MapDeviceSystem
             _nodeHoverUiIndex = -1;
             _nodeHoverStartedAt = TimeSpan.MinValue;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"clicked {nodeName} atlas child {uiIndex} ({_nodeClickAttempts}/{MaxClickAttempts})";
+            Status = $"clicked {nodeName} atlas child {uiIndex} ({_nodeClickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Emit(
                 "MapDevice", "map-device.node-selection-requested",
                 BubblesBot.Bot.Diagnostics.EventSeverity.Info, Status,
@@ -638,7 +638,7 @@ public sealed class MapDeviceSystem
         BehaviorContext ctx, string nodeName, int uiIndex, float centerX, float centerY)
     {
         _nodePanActive = true;
-        if (_nodePanAttempts >= MaxAtlasPanAttempts)
+        if (_nodePanAttempts >= MaxAtlasPanAttemptsFor(ctx))
             return Fail($"failed to pan '{nodeName}' atlas child {uiIndex} into an unobstructed viewport");
 
         var window = ctx.Snapshot.Window;
@@ -708,7 +708,7 @@ public sealed class MapDeviceSystem
             _nodeHoverUiIndex = -1;
             _nodeHoverStartedAt = TimeSpan.MinValue;
             _nodePanActive = false;
-            Status = $"panning {nodeName} into safe atlas viewport ({_nodePanAttempts}/{MaxAtlasPanAttempts})";
+            Status = $"panning {nodeName} into safe atlas viewport ({_nodePanAttempts}/{MaxAtlasPanAttemptsFor(ctx)})";
             Diagnostics.EventLog.Emit(
                 "MapDevice", "map-device.atlas-pan-requested",
                 Diagnostics.EventSeverity.Info, Status,
@@ -838,8 +838,8 @@ public sealed class MapDeviceSystem
             .ToArray();
         if (eligible.Length == 0)
             return Fail($"{candidates.Length} carried maps are visible, but none has the is_uber_blighted_map stat");
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"failed to stage carried map after {MaxClickAttempts} right-clicks");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to stage carried map after {MaxClickAttemptsFor(ctx)} right-clicks");
 
         var carried = eligible[0];
         var rect = carried.Rect!.Value;
@@ -854,7 +854,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"right-clicked carried map ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"right-clicked carried map ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Emit(
                 "blight", "blight.device-insert-requested",
                 BubblesBot.Bot.Diagnostics.EventSeverity.Info,
@@ -920,8 +920,8 @@ public sealed class MapDeviceSystem
             .ToArray();
         if (eligible.Length == 0)
             return Fail($"no unrolled Normal-rarity T16 key in player inventory ({visibleMaps.Length} map items visible)");
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"failed to stage carried '{targetName}' after {MaxClickAttempts} right-clicks");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to stage carried '{targetName}' after {MaxClickAttemptsFor(ctx)} right-clicks");
 
         var carried = eligible[0];
         var rect = carried.Rect!.Value;
@@ -936,7 +936,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"ctrl-clicked carried T16 key for {targetName} ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"ctrl-clicked carried T16 key for {targetName} ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Emit(
                 "maprun", "maprun.carried-map-insert-requested",
                 BubblesBot.Bot.Diagnostics.EventSeverity.Info,
@@ -1006,7 +1006,7 @@ public sealed class MapDeviceSystem
             .FirstOrDefault();
         if (carried.ItemEntity == 0 || carried.Rect is not { } rect)
             return Fail("no identified Normal/Rare Shaper Guardian key is visible in inventory");
-        if (_clickAttempts >= MaxClickAttempts)
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
             return Fail("failed to stage carried Shaper Guardian key");
 
         var (x, y) = ctx.Snapshot.Window.ToScreen((int)rect.CenterX, (int)rect.CenterY);
@@ -1018,7 +1018,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"staging Guardian key ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"staging Guardian key ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
         }
         return Result.InProgress;
     }
@@ -1075,8 +1075,8 @@ public sealed class MapDeviceSystem
             carried = item;
             break;
         }
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"failed to stage Simulacrum after {MaxClickAttempts} right-clicks");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"failed to stage Simulacrum after {MaxClickAttemptsFor(ctx)} right-clicks");
 
         if (carried is { } carriedItem)
         {
@@ -1093,7 +1093,7 @@ public sealed class MapDeviceSystem
             {
                 _clickAttempts++;
                 _lastActionAt = BotMonotonicClock.Now;
-                Status = $"right-clicked carried Simulacrum ({_clickAttempts}/{MaxClickAttempts})";
+                Status = $"right-clicked carried Simulacrum ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
                 BubblesBot.Bot.Diagnostics.EventLog.Emit(
                     "simulacrum", "simulacrum.device-insert-requested",
                     BubblesBot.Bot.Diagnostics.EventSeverity.Info,
@@ -1124,7 +1124,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"right-clicked Simulacrum ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"right-clicked Simulacrum ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Emit(
                 "simulacrum", "simulacrum.device-insert-requested",
                 BubblesBot.Bot.Diagnostics.EventSeverity.Info,
@@ -1203,8 +1203,8 @@ public sealed class MapDeviceSystem
             return Result.InProgress;
         }
 
-        if (_clickAttempts >= MaxClickAttempts)
-            return Fail($"activate clicked {MaxClickAttempts}× without portal spawn");
+        if (_clickAttempts >= MaxClickAttemptsFor(ctx))
+            return Fail($"activate clicked {MaxClickAttemptsFor(ctx)}× without portal spawn");
 
         var (sx, sy) = ctx.Snapshot.Window.ToScreen((int)btn.Value.CenterX, (int)btn.Value.CenterY);
         var ticket = ctx.Input.Click(sx, sy, ClickIntent.InteractUi, "activate map",
@@ -1213,7 +1213,7 @@ public sealed class MapDeviceSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"clicked activate ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"clicked activate ({_clickAttempts}/{MaxClickAttemptsFor(ctx)})";
             BubblesBot.Bot.Diagnostics.EventLog.Log("MapDevice", $"activate click sent at ({sx},{sy})");
         }
         return Result.InProgress;
@@ -1318,8 +1318,8 @@ public sealed class MapDeviceSystem
         // fallback for the brief frame before the label enters the snapshot.
         var clickPoint = ResolvePortalClickPoint(ctx, portal);
         if (clickPoint is null) { Status = "no portal click point"; return Result.InProgress; }
-        if (_clickAttempts >= MaxPortalClickAttempts)
-            return Fail($"failed to enter map after {MaxPortalClickAttempts} portal-label clicks");
+        if (_clickAttempts >= MaxPortalClickAttemptsFor(ctx))
+            return Fail($"failed to enter map after {MaxPortalClickAttemptsFor(ctx)} portal-label clicks");
 
         var startAreaHash = ctx.Snapshot.AreaHash;
         var ticket = ctx.Input.Click(clickPoint.Value.X, clickPoint.Value.Y,
@@ -1491,6 +1491,15 @@ public sealed class MapDeviceSystem
         var (sx, sy) = w.ToScreen((int)center!.Value.X, (int)center.Value.Y);
         return (sx, sy);
     }
+
+    private static int MaxClickAttemptsFor(BehaviorContext ctx)
+        => LatencyPolicy.RetryLimit(MaxClickAttempts, ctx.Settings);
+
+    private static int MaxPortalClickAttemptsFor(BehaviorContext ctx)
+        => LatencyPolicy.RetryLimit(MaxPortalClickAttempts, ctx.Settings);
+
+    private static int MaxAtlasPanAttemptsFor(BehaviorContext ctx)
+        => LatencyPolicy.RetryLimit(MaxAtlasPanAttempts, ctx.Settings, maxExtraAttempts: 4);
 
     private static float Distance(Vector2i a, Vector2i b)
     {

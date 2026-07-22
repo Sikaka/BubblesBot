@@ -61,7 +61,12 @@ public sealed class TileMapView
         if (areaHash == 0) return Empty;
         lock (_cacheLock)
         {
-            if (_cached is not null && _cached.AreaHash == areaHash) return _cached;
+            // A first read on the loading->world edge can see the full tile array before its
+            // TgtFile pointers are populated. Do not cache that zero-key race for the entire
+            // area instance; retry on the next snapshot until semantic tile data appears.
+            if (_cached is not null && _cached.AreaHash == areaHash
+                && (_cached._byKey.Count > 0 || _cached.TileCount == 0 || _cached.LoadError.Length > 0))
+                return _cached;
             _cached = Load(reader, ingameDataAddress, areaHash);
             return _cached;
         }

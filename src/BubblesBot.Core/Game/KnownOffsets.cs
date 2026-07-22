@@ -384,6 +384,27 @@ public static class KnownOffsets
         public const int IsTargeted          = 0x32;  // unverified â€” bool
     }
 
+    public static class TriggerableBlockageComponent
+    {
+        // ExileApi layout; closed/open transition is being live-validated by
+        // MapDoorOpenLiveTest before this becomes a runtime routing oracle.
+        public const int IsClosed = 0x30;
+        public const int DataBegin = 0x38;
+        public const int DataEnd = 0x40;
+        public const int MinX = 0x50;
+        public const int MinY = 0x54;
+        public const int MaxX = 0x58;
+        public const int MaxY = 0x5C;
+    }
+
+    public static class TransitionableComponent
+    {
+        // ExileApi names these Flag1/Flag2; semantics are intentionally left unnamed until
+        // the door before/after capture below proves whether either is useful to routing.
+        public const int Flag1 = 0x120;
+        public const int Flag2 = 0x124;
+    }
+
     public static class ObjectMagicPropertiesComponent
     {
         // OK Int32 — validated 2026-05-05 via POEMCP probe on a Rare Revenant. The decompiled

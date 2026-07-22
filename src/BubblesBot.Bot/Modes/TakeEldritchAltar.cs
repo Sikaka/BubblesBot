@@ -1,6 +1,7 @@
 using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Behaviors.Movement;
 using BubblesBot.Bot.Input;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Bot.Systems;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Pathfinding;
@@ -86,6 +87,7 @@ public sealed class TakeEldritchAltar : IBehavior
 
     public BehaviorStatus Tick(BehaviorContext ctx)
     {
+        var maxClickAttempts = LatencyPolicy.RetryLimit(MaxClickAttempts, ctx.Settings);
         var target = Next(ctx);
         if (target is null) { LastDecision = "no target"; return LastStatus = BehaviorStatus.Failure; }
         if (ctx.Live is not { } live) { LastDecision = "no live player"; return LastStatus = BehaviorStatus.Failure; }
@@ -181,12 +183,12 @@ public sealed class TakeEldritchAltar : IBehavior
         // and (Now - TimeSpan.MinValue) throws OverflowException (live incident 2026-07-15).
         if (BotMonotonicClock.ElapsedSince(_lastClickAt).TotalMilliseconds < ClickThrottleMs)
         {
-            LastDecision = $"throttled ({_attempts}/{MaxClickAttempts})";
+            LastDecision = $"throttled ({_attempts}/{maxClickAttempts})";
             return LastStatus = BehaviorStatus.Running;
         }
-        if (_attempts >= MaxClickAttempts)
+        if (_attempts >= maxClickAttempts)
         {
-            Resolve(ctx, target, taken: false, $"altar {target.Id} still readable after {MaxClickAttempts} clicks; giving up");
+            Resolve(ctx, target, taken: false, $"altar {target.Id} still readable after {maxClickAttempts} clicks; giving up");
             return LastStatus = BehaviorStatus.Failure;
         }
 
@@ -201,7 +203,7 @@ public sealed class TakeEldritchAltar : IBehavior
             _lastClickAt = now;
             _attempts++;
             Diagnostics.EventLog.Log(Name,
-                $"clicked {_chosenSide} of altar {targetId} abs=({sx},{sy}) attempt {_attempts}/{MaxClickAttempts}");
+                $"clicked {_chosenSide} of altar {targetId} abs=({sx},{sy}) attempt {_attempts}/{maxClickAttempts}");
             LastDecision = $"clicked {_chosenSide} (attempt {_attempts})";
         }
         else

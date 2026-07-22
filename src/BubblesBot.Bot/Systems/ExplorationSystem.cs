@@ -70,6 +70,8 @@ public sealed class ExplorationSystem
     // region. Beacon candidates outside it are unreachable (across a gap, separate blob)
     // and would wedge FollowPath in permanent 'no path'.
     private HashSet<long>? _reachableWhenDry;
+    private Vector2i? _doorObjective;
+    private readonly Dictionary<long, TimeSpan> _rejectedFrontiers = new();
     private Vector2i? _lastPlayer;
     private double _headingX;
     private double _headingY;
@@ -92,6 +94,7 @@ public sealed class ExplorationSystem
 
     public double LastFrontierScore { get; private set; }
     public string LastFrontierReason { get; private set; } = "none";
+    public Vector2i? CurrentFrontierGoal => _frontierGoal;
 
     /// <summary>Mark everything in bubble range of the player as revealed. Call every tick from the mode.</summary>
     public void TrackVisit(GameSnapshot snapshot, Vector2i playerGrid)
@@ -105,6 +108,8 @@ public sealed class ExplorationSystem
             _frontierGoal = null;
             IsExhausted = false;
             _reachableWhenDry = null;
+            _doorObjective = null;
+            _rejectedFrontiers.Clear();
             _trackingArea = snapshot.AreaHash;
             _lastPlayer = null;
             _headingX = _headingY = 0;
@@ -171,7 +176,7 @@ public sealed class ExplorationSystem
 
         // Reuse the cached goal until we've reached it (it becomes visited) or it's no longer
         // walkable — so the bot commits to a heading rather than re-picking every tick.
-        if (_frontierGoal is { } g && !IsVisited(g) && pf.Read(g.X, g.Y) > 0)
+        if (_frontierGoal is { } g && !IsVisited(g) && !IsRejected(g) && pf.Read(g.X, g.Y) > 0)
         {
             IsExhausted = false;
             return g;
@@ -203,6 +208,100 @@ public sealed class ExplorationSystem
         }
         IsExhausted = _frontierGoal is null;
         return _frontierGoal;
+    }
+
+    /// <summary>
+    /// When the ordinary movement-component flood is dry, use targeting terrain as a
+    /// door-permeable graph to find a closed Door that is specifically on the route to an
+    /// unvisited frontier. This is deliberately not part of generic loot interaction: a door
+    /// with no unexplored target behind it is ignored.
+    /// </summary>
+    public RequiredDoorRoute? FindRequiredDoor(BehaviorContext ctx)
+    {
+        if (ctx.Live is not { } live) return null;
+        var nav = ctx.Snapshot.Nav;
+        if (!nav.IsAvailable
+            || nav.PathReader is not { } path
+            || nav.TargetingReader is not { } targeting)
+            return null;
+
+        var doors = ctx.Snapshot.GroundLabels
+            .Where(label => label.IsLabelVisible
+                && label.IsDoorIdentity
+                && label.DoorState == DoorBlockageState.Closed
+                && label.EntityGridPosition is not null)
+            .Select(label => new ClosedDoorCandidate(
+                label.EntityId, label.LabelAddress, label.EntityGridPosition!.Value))
+            .ToArray();
+        if (doors.Length == 0) return null;
+
+        if (_doorObjective is { } objective)
+        {
+            var objectiveRoute = DoorRoutingPolicy.FindRequiredDoorToTarget(
+                path, targeting, live.GridPosition, doors, objective);
+            if (objectiveRoute is not null) return objectiveRoute;
+            RejectDoorObjective();
+        }
+
+        if (_reachableWhenDry is null) return null;
+
+        return DoorRoutingPolicy.FindRequiredDoor(
+            path,
+            targeting,
+            live.GridPosition,
+            doors,
+            (x, y) => path.Read(x, y) > 0 && _reachableWhenDry.Contains(Pack(x, y)),
+            IsVisited);
+    }
+
+    /// <summary>Invalidate every cache derived from the movement layer after a door opens.
+    /// The live terrain bytes update in place, but the frontier dry-set and coarse connected
+    /// component are snapshots of the old topology and must be rebuilt immediately.</summary>
+    public void OnMovementTerrainChanged(Vector2i resumeGoal)
+    {
+        _frontierGoal = resumeGoal;
+        _doorObjective = null;
+        _nextBfsAt = TimeSpan.Zero;
+        _reachableWhenDry = null;
+        _walkableQuanta = null;
+        _walkableQuantaArea = 0;
+        _connectedWalkableQuanta = null;
+        _connectedWalkableRoot = 0;
+        _farthestArea = 0;
+        _farthestConnectedPoint = null;
+        IsExhausted = false;
+    }
+
+    /// <summary>
+    /// Preserve an unreachable known frontier as a door-routing objective. The ordinary
+    /// follower reports this after A* fails; the next behavior-tree tick can then decide
+    /// whether a weighted closed-door edge reaches it instead of retrying forever.
+    /// </summary>
+    public void ReportPathFailure(Vector2i goal)
+    {
+        if (_frontierGoal is not { } current || current.X != goal.X || current.Y != goal.Y) return;
+        _doorObjective = goal;
+        _frontierGoal = null;
+        _nextBfsAt = BotMonotonicClock.Now.Add(TimeSpan.FromSeconds(2));
+        IsExhausted = false;
+    }
+
+    private void RejectDoorObjective()
+    {
+        if (_doorObjective is { } objective)
+            _rejectedFrontiers[Pack(objective.X / VisitedQuantum, objective.Y / VisitedQuantum)] =
+                BotMonotonicClock.Now.Add(TimeSpan.FromSeconds(8));
+        _doorObjective = null;
+        _nextBfsAt = TimeSpan.Zero;
+    }
+
+    private bool IsRejected(Vector2i point)
+    {
+        var key = Pack(point.X / VisitedQuantum, point.Y / VisitedQuantum);
+        if (!_rejectedFrontiers.TryGetValue(key, out var until)) return false;
+        if (BotMonotonicClock.Now < until) return true;
+        _rejectedFrontiers.Remove(key);
+        return false;
     }
 
     /// <summary>
@@ -291,7 +390,7 @@ public sealed class ExplorationSystem
             {
                 long dx = x - start.X, dy = y - start.Y;
                 var position = new Vector2i { X = x, Y = y };
-                if (dx * dx + dy * dy >= minD2)
+                if (dx * dx + dy * dy >= minD2 && !IsRejected(position))
                 {
                     firstCandidateCost = Math.Min(firstCandidateCost, cost);
                     var quantum = Pack(x / VisitedQuantum, y / VisitedQuantum);
@@ -518,6 +617,8 @@ public sealed class ExplorationSystem
         _connectedWalkableQuanta = null;
         _connectedWalkableRoot = 0;
         _reachableWhenDry = null;
+        _doorObjective = null;
+        _rejectedFrontiers.Clear();
         _lastPlayer = null;
         _headingX = _headingY = 0;
         _waveOrigin = default;

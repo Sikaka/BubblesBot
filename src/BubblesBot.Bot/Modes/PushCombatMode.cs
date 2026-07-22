@@ -48,6 +48,7 @@ public sealed class PushCombatMode : IBotMode
     private readonly Func<EntityCache?>  _getEntities;
     private readonly Func<Strategies.FarmingStrategy?> _getStrategy;
     private readonly SettingsStore _settings;
+    private readonly Knowledge.AtlasMapKnowledgeObserver? _atlasKnowledge;
 
     private readonly CombatCoordinator _coord;
     private readonly MovementSystem    _movement;
@@ -55,6 +56,7 @@ public sealed class PushCombatMode : IBotMode
     private readonly ExplorationSystem _exploration = new();
     private readonly ExploreFrontier   _explore;
     private readonly InteractSystem    _interact = new();
+    private readonly InteractSystem    _doorInteract = new();
     private readonly LootClosestVisible _loot;
     private readonly EnterAreaTransition _transition;
     private readonly EnterAreaTransition _completedBossArenaExit;
@@ -64,6 +66,7 @@ public sealed class PushCombatMode : IBotMode
     private readonly FollowPath          _bossArenaInward;
     private readonly FollowPath          _visibleBossApproach;
     private readonly FollowPath          _chimeraRevealApproach;
+    private readonly FollowPath          _requiredDoorApproach;
     private readonly LootMemory        _lootMemory = new();
     private readonly FollowPath        _lootReturn;
     private readonly FollowPath        _lootApproach;
@@ -113,6 +116,7 @@ public sealed class PushCombatMode : IBotMode
     private readonly RitualPriorityTracker _ritualPriority = new();
     private readonly BossEvidenceTracker _bossTracker = new();
     private string _bossConfiguredMap = "";
+    private string _bossConfiguredFragmentsKey = "";
     private TimeSpan? _bossClearCandidateSince;
     private readonly HashSet<uint> _deliriumDriveBySkipped = new();
     private TimeSpan _deliriumPackEnteredAt = TimeSpan.MinValue;
@@ -134,6 +138,10 @@ public sealed class PushCombatMode : IBotMode
     private bool _chimeraRevealGoalIsCloud;
     private readonly HashSet<Vector2i> _chimeraCloudsVisited = new();
     private Vector2i? _persistentTraversalOrigin;
+    private RequiredDoorRoute? _requiredDoorRoute;
+    private bool _requiredDoorClickPending;
+    private int _requiredDoorClickAttempts;
+    private TimeSpan _nextRequiredDoorSearchAt = TimeSpan.MinValue;
     private const int RitualTimeoutSeconds = 180;
     private const float RitualLeashRadius = 45f;
     private const float RitualStragglerRadius = 150f;
@@ -176,13 +184,15 @@ public sealed class PushCombatMode : IBotMode
     public PushCombatMode(SettingsStore settings, CombatCoordinator coord,
         Func<GameSnapshot?> getSnapshot, Func<LivePlayer?> getLive,
         Func<EntityCache?> getEntities, bool orchestrated = false,
-        Func<Strategies.FarmingStrategy?>? getStrategy = null)
+        Func<Strategies.FarmingStrategy?>? getStrategy = null,
+        Knowledge.AtlasMapKnowledgeObserver? atlasKnowledge = null)
     {
         _settings    = settings;
         _getSnapshot = getSnapshot;
         _getLive     = getLive;
         _getEntities = getEntities;
         _getStrategy = getStrategy ?? (() => null);
+        _atlasKnowledge = atlasKnowledge;
         _orchestrated = orchestrated;
         // Shared combat brain: one movement/skills authority across general-combat modes.
         _coord       = coord;
@@ -218,6 +228,10 @@ public sealed class PushCombatMode : IBotMode
         _chimeraRevealApproach = new FollowPath("reveal dormant Chimera", _movement,
             _ => _chimeraRevealGoal, _skills,
             goalArrivalRadius: 5f,
+            allowGapCrossing: false);
+        _requiredDoorApproach = new FollowPath("approach required exploration door", _movement,
+            _ => _requiredDoorRoute?.ApproachGrid, _skills,
+            goalArrivalRadius: 4f,
             allowGapCrossing: false);
         // Pack-beacons share the blacklist too — otherwise the end-of-zone mop-up would
         // walk back to an essence pack the engage branch just gave up on.
@@ -392,6 +406,8 @@ public sealed class PushCombatMode : IBotMode
             // altar or after BEGIN, the exclusive branch near the top owns every tick.
             new If("ultimatum route", ctx => _ultimatum.WantsControl(ctx),
                 new Behaviors.Action("ultimatum approach", UltimatumTick)),
+            new If("open required exploration door", ShouldOpenRequiredDoor,
+                new Behaviors.Action("required door", RequiredDoorTick)),
             new If("zone finished", ZoneFinished, new Behaviors.Action("next zone", NextZoneTick)),
             new Behaviors.Action("push", PushTick));
     }
@@ -678,18 +694,143 @@ public sealed class PushCombatMode : IBotMode
 
     // ── Zone loop ───────────────────────────────────────────────────────────
 
+    /// <summary>Latch a closed door only when it gates a still-unvisited frontier.</summary>
+    private bool ShouldOpenRequiredDoor(BehaviorContext ctx)
+    {
+        if (_requiredDoorRoute is not null) return true;
+        if (BotMonotonicClock.Now < _nextRequiredDoorSearchAt) return false;
+
+        var route = _exploration.FindRequiredDoor(ctx);
+        if (route is null)
+        {
+            _nextRequiredDoorSearchAt = BotMonotonicClock.Now.Add(TimeSpan.FromSeconds(2));
+            return false;
+        }
+
+        _requiredDoorRoute = route;
+        _requiredDoorClickPending = false;
+        _requiredDoorClickAttempts = 0;
+        _requiredDoorApproach.Reset();
+        Diagnostics.EventLog.Emit(
+            "exploration", "exploration.required-door-found", Diagnostics.EventSeverity.Info,
+            $"door={route.Value.EntityId} grid=({route.Value.DoorGrid.X},{route.Value.DoorGrid.Y}) " +
+            $"approach=({route.Value.ApproachGrid.X},{route.Value.ApproachGrid.Y}) " +
+            $"frontier=({route.Value.FrontierGrid.X},{route.Value.FrontierGrid.Y}) targetingCost={route.Value.TargetingCost}");
+        return true;
+    }
+
+    private BehaviorStatus RequiredDoorTick(BehaviorContext ctx)
+    {
+        if (_requiredDoorRoute is not { } route) return BehaviorStatus.Failure;
+        var label = FindClosedDoorLabel(ctx.Snapshot, route.EntityId);
+
+        if (_requiredDoorClickPending)
+        {
+            if (_doorInteract.Current is { IsResolved: false })
+            {
+                _movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+                return BehaviorStatus.Running;
+            }
+
+            _requiredDoorClickPending = false;
+            _doorInteract.Tick();
+            if (label is null)
+            {
+                Diagnostics.EventLog.Emit(
+                    "exploration", "exploration.required-door-opened", Diagnostics.EventSeverity.Info,
+                    $"door={route.EntityId}; invalidating movement-terrain exploration caches");
+                _exploration.OnMovementTerrainChanged(route.FrontierGrid);
+                ClearRequiredDoor();
+                return BehaviorStatus.Success;
+            }
+
+            if (_requiredDoorClickAttempts >= 3)
+            {
+                Diagnostics.EventLog.Emit(
+                    "exploration", "exploration.required-door-failed", Diagnostics.EventSeverity.Warning,
+                    $"door={route.EntityId} remained closed after {_requiredDoorClickAttempts} verified attempts");
+                ClearRequiredDoor();
+                _nextRequiredDoorSearchAt = BotMonotonicClock.Now.Add(TimeSpan.FromSeconds(5));
+                return BehaviorStatus.Failure;
+            }
+        }
+
+        if (label is null || !label.IsLabelVisible || !label.IsRectOnScreen || label.DistanceToPlayer > 12f)
+        {
+            var approach = _requiredDoorApproach.Tick(ctx);
+            if (approach != BehaviorStatus.Failure) return BehaviorStatus.Running;
+
+            Diagnostics.EventLog.Emit(
+                "exploration", "exploration.required-door-unreachable", Diagnostics.EventSeverity.Warning,
+                $"could not reach approach point for door={route.EntityId}");
+            ClearRequiredDoor();
+            _nextRequiredDoorSearchAt = BotMonotonicClock.Now.Add(TimeSpan.FromSeconds(5));
+            return BehaviorStatus.Failure;
+        }
+
+        // Re-prove the need immediately before clicking. Exploration or combat movement may
+        // have exposed another route since this door was selected; in that case leave it shut.
+        var proof = _exploration.FindRequiredDoor(ctx);
+        if (proof is not { } current || current.EntityId != route.EntityId)
+        {
+            Diagnostics.EventLog.Emit(
+                "exploration", "exploration.required-door-no-longer-needed", Diagnostics.EventSeverity.Info,
+                $"door={route.EntityId} is no longer on the route to an unvisited frontier");
+            ClearRequiredDoor();
+            return BehaviorStatus.Failure;
+        }
+
+        var avoid = ctx.Snapshot.GroundLabels
+            .Where(candidate => candidate.LabelAddress != label.LabelAddress && candidate.IsLabelVisible)
+            .Select(candidate => candidate.LabelRect)
+            .Where(rect => rect is not null)
+            .Select(rect => rect!.Value)
+            .ToArray();
+        var entityId = route.EntityId;
+        var ticket = _doorInteract.Begin(
+            label,
+            ctx.Input,
+            ctx.Snapshot.Window,
+            verify: () => _getSnapshot()?.GroundLabels.All(candidate =>
+                candidate.EntityId != entityId || candidate.DoorState != DoorBlockageState.Closed) == true,
+            description: $"open route-required door {entityId}",
+            timeoutMs: 2500,
+            avoid: avoid);
+        if (ticket is null) return BehaviorStatus.Running;
+
+        _requiredDoorClickAttempts++;
+        _requiredDoorClickPending = true;
+        _movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+        return BehaviorStatus.Running;
+    }
+
+    private static GroundLabelView? FindClosedDoorLabel(GameSnapshot snapshot, uint entityId)
+        => snapshot.GroundLabels.FirstOrDefault(label =>
+            label.EntityId == entityId
+            && label.IsDoorIdentity
+            && label.DoorState == DoorBlockageState.Closed);
+
+    private void ClearRequiredDoor()
+    {
+        _requiredDoorRoute = null;
+        _requiredDoorClickPending = false;
+        _requiredDoorClickAttempts = 0;
+        _requiredDoorApproach.Reset();
+        _doorInteract.Cancel();
+    }
+
     /// <summary>Exploration exhausted (no frontier, no beacon) for a sustained window —
     /// the debounce absorbs the single-tick flickers around goal handoffs.</summary>
     private bool ZoneFinished(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
         var canComplete = MapZoneCompletionPolicy.CanCompleteMap(
             ExplorationDone(ctx), bossRequired, BossComplete(ctx), _delirium.IsSettled,
             BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName));
         if (MapZoneCompletionPolicy.ShouldCompleteImmediately(
                 canComplete,
-                BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+                HasSeparateBossArenaFor(mapName),
                 _bossArenaEntered))
         {
             _exhaustedSince = null;
@@ -711,14 +852,14 @@ public sealed class PushCombatMode : IBotMode
 
     private bool TraversalDone(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
         if (ExplorationDone(ctx))
         {
             if (MapZoneCompletionPolicy.ShouldContinueBossDiscovery(
                     bossRequired,
                     BossComplete(ctx),
-                    BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+                    HasSeparateBossArenaFor(mapName),
                     _bossArenaEntered,
                     _exploration.IsExhausted,
                     FindEligibleTransition(ctx) is not null))
@@ -795,8 +936,8 @@ public sealed class PushCombatMode : IBotMode
             || ctx.Live is not { } live)
             return false;
 
-        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
-        if (!BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+        var mapName = MapNameFor(ctx);
+        if (!HasSeparateBossArenaFor(mapName))
             return false;
 
         if (_bossCheckpointGoal is null)
@@ -860,7 +1001,7 @@ public sealed class PushCombatMode : IBotMode
     /// </summary>
     private bool BossComplete(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         if (!_bossTracker.IsComplete
             || HasFreshLivingRequiredBossEntity(ctx, mapName)
             || HasLivingHostileWithin(ctx, 300f))
@@ -877,7 +1018,7 @@ public sealed class PushCombatMode : IBotMode
     private bool ShouldEnterRequiredBossArena(BehaviorContext ctx)
     {
         if (ctx.Strategy?.Completion.RequireBossKill != true) return false;
-        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
+        var mapName = MapNameFor(ctx);
         // Nearby positive boss identity means we are already inside the arena. The distance
         // gate matters for same-hash arenas: parent-zone scans can retain a remote boss corpse,
         // which must not reconstruct the arena latch after we have exited.
@@ -891,7 +1032,7 @@ public sealed class PushCombatMode : IBotMode
         }
         if (BossComplete(ctx)) return false;
         if (_bossArenaEntered) return false;
-        var hasSeparateArena = BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+        var hasSeparateArena = HasSeparateBossArenaFor(mapName);
         var hasTerminalEndpoint = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName);
         if (!hasSeparateArena && !hasTerminalEndpoint)
             return false;
@@ -916,10 +1057,10 @@ public sealed class PushCombatMode : IBotMode
         return true;
     }
 
-    private static bool HasFreshRequiredBossEntity(BehaviorContext ctx, string mapName)
+    private bool HasFreshRequiredBossEntity(BehaviorContext ctx, string mapName)
     {
         if (ctx.Entities is null || ctx.Live is not { } live) return false;
-        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
+        var fragments = BossFragmentsFor(mapName);
         return fragments.Count > 0 && ctx.Entities.Entries.Values.Any(entry =>
             !entry.IsStale
             && entry.Kind == EntityListReader.EntityKind.Monster
@@ -928,10 +1069,10 @@ public sealed class PushCombatMode : IBotMode
                 fragment, StringComparison.OrdinalIgnoreCase)));
     }
 
-    private static bool HasFreshLivingRequiredBossEntity(BehaviorContext ctx, string mapName)
+    private bool HasFreshLivingRequiredBossEntity(BehaviorContext ctx, string mapName)
     {
         if (ctx.Entities is null || ctx.Live is not { } live) return false;
-        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
+        var fragments = BossFragmentsFor(mapName);
         return fragments.Count > 0 && ctx.Entities.Entries.Values.Any(entry =>
             !entry.IsStale
             && entry.Kind == EntityListReader.EntityKind.Monster
@@ -951,10 +1092,10 @@ public sealed class PushCombatMode : IBotMode
 
     private bool BossHuntActive(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         var connectedTerminal =
             BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
-            && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+            && !HasSeparateBossArenaFor(mapName);
         // Guardian layouts are linear rush maps. Their physical endpoint is the primary
         // traversal objective from spawn; combat/loot above the route still gets first
         // refusal. Do not gate this on reveal percentage: network-bubble coverage and
@@ -972,7 +1113,7 @@ public sealed class PushCombatMode : IBotMode
         // after a death/restart, ordinary coverage can exhaust far from the already-revealed
         // arena and otherwise leave the required boss permanently undiscovered.
         var hasDedicatedBossDestination =
-            BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName)
+            HasSeparateBossArenaFor(mapName)
             || BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName);
         return MapZoneCompletionPolicy.ShouldPrioritizeBossArena(
             ctx.Strategy?.Completion.RequireBossKill == true,
@@ -987,14 +1128,14 @@ public sealed class PushCombatMode : IBotMode
         _bossArenaSearchGoal = null;
         if (!BossHuntActive(ctx) || ctx.Live is not { } live)
             return false;
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         var connectedTerminal = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
-            && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+            && !HasSeparateBossArenaFor(mapName);
         if (_bossArenaLandmarkRejected && !connectedTerminal) return false;
         // A real separate arena is owned by the verified transition branch. Connected
         // Guardian maps also contain ordinary corridor transitions, but those must not
         // suppress their terminal boss-landmark route.
-        if (BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName)
+        if (HasSeparateBossArenaFor(mapName)
             && FindEligibleTransition(ctx) is not null)
             return false;
         _bossArenaSearchGoal = ctx.Snapshot.TileMap.FindNearestLandmark(
@@ -1023,9 +1164,9 @@ public sealed class PushCombatMode : IBotMode
         var status = _bossArenaSearch.Tick(ctx);
         if (status == BehaviorStatus.Success)
         {
-            var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+            var mapName = MapNameFor(ctx);
             if (BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
-                && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+                && !HasSeparateBossArenaFor(mapName))
             {
                 // Connected Guardian arenas have no transition to click. Reaching their
                 // landmark is the desired result; hold this branch until proximity streams
@@ -1081,11 +1222,11 @@ public sealed class PushCombatMode : IBotMode
 
     private bool ShouldExitCompletedBossArena(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         if (!MapZoneCompletionPolicy.ShouldExitCompletedBossArena(
                 ctx.Strategy?.Completion.RequireBossKill == true,
                 BossComplete(ctx),
-                BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+                HasSeparateBossArenaFor(mapName),
                 _bossArenaEntered))
             return false;
 
@@ -1132,8 +1273,8 @@ public sealed class PushCombatMode : IBotMode
             || ctx.Live is not { } live)
             return false;
 
-        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
-        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
+        var mapName = MapNameFor(ctx);
+        var fragments = BossFragmentsFor(mapName);
         if (fragments.Count == 0) return false;
         var chimera = mapName.Contains("Chimera", StringComparison.OrdinalIgnoreCase);
 
@@ -1172,7 +1313,7 @@ public sealed class PushCombatMode : IBotMode
 
     private bool ShouldRevealDormantChimera(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var mapName = MapNameFor(ctx);
         if (!mapName.Contains("Chimera", StringComparison.OrdinalIgnoreCase)
             || !_bossArenaEntered
             || BossComplete(ctx)
@@ -1190,7 +1331,7 @@ public sealed class PushCombatMode : IBotMode
             return false;
         }
 
-        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
+        var fragments = BossFragmentsFor(mapName);
         var dormant = ctx.Entities.Entries.Values.FirstOrDefault(entry =>
             !entry.IsStale
             && entry.LifeReadable.Truth == ObservationTruth.True
@@ -1324,9 +1465,8 @@ public sealed class PushCombatMode : IBotMode
             || ctx.Live is null)
             return false;
 
-        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
-        var expectedBosses = BubblesBot.Core.Knowledge.MapBossCatalog
-            .BossFragments(mapName).Count;
+        var mapName = MapNameFor(ctx);
+        var expectedBosses = BossFragmentsFor(mapName).Count;
         if (!MapZoneCompletionPolicy.ShouldSearchArenaForMissingBoss(
                 BossComplete(ctx), _bossTracker.BossesDead, expectedBosses))
             return false;
@@ -1501,7 +1641,7 @@ public sealed class PushCombatMode : IBotMode
     {
         var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
         var bossCompletesTraversal = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(
-            ctx.Strategy?.Supply.Map.TargetMapName ?? "");
+            MapNameFor(ctx));
         if (MapZoneCompletionPolicy.CanCompleteMap(
                 ExplorationDone(ctx), bossRequired, BossComplete(ctx), _delirium.IsSettled,
                 bossCompletesTraversal))
@@ -1522,13 +1662,13 @@ public sealed class PushCombatMode : IBotMode
         _transitGoal = target?.GridPosition;
         if (target is not null)
         {
-            var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? string.Empty;
+            var mapName = MapNameFor(ctx);
             // If checkpoint placement did not claim the final door, the exhausted-zone
             // fallback can still be the route into a known separate boss arena. Preserve
             // the same-hash displacement evidence and enable inward staging instead of
             // treating it as an ordinary zone hop.
             if (bossRequired && !BossComplete(ctx)
-                && BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+                && HasSeparateBossArenaFor(mapName))
                 return BossArenaTransitionTick(ctx);
             return _transition.Tick(ctx);
         }
@@ -1560,6 +1700,7 @@ public sealed class PushCombatMode : IBotMode
         _movement.Release();
         _coord.ResetCombat();
         _interact.Cancel();
+        ClearRequiredDoor();
         _transition.Reset();
         _completedBossArenaExit.Reset();
         _bossCheckpointApproach.Reset();
@@ -1606,6 +1747,7 @@ public sealed class PushCombatMode : IBotMode
         // zones read as exhausted. ExplorationSystem swaps per-area state itself.
         _explore.Reset();
         _interact.Cancel();
+        ClearRequiredDoor();
         _loot.Reset();
         _transition.Reset();
         _completedBossArenaExit.Reset();
@@ -1799,7 +1941,7 @@ public sealed class PushCombatMode : IBotMode
                 trackerComplete = _bossTracker.IsComplete,
                 complete = BossComplete(ctx),
                 freshLivingBlocker = HasFreshLivingRequiredBossEntity(
-                    ctx, ctx.Strategy?.Supply.Map.TargetMapName ?? ""),
+                    ctx, MapNameFor(ctx)),
                 activeLivingBlocker = HasLivingHostileWithin(ctx, 300f),
                 seen = _bossTracker.BossesSeen,
                 dead = _bossTracker.BossesDead,
@@ -1846,7 +1988,7 @@ public sealed class PushCombatMode : IBotMode
                         : null,
                 },
                 freshRequiredEntity = HasFreshRequiredBossEntity(
-                    ctx, ctx.Strategy?.Supply.Map.TargetMapName ?? ""),
+                    ctx, MapNameFor(ctx)),
                 chimeraReveal = _chimeraRevealGoal is { } reveal
                     ? new
                     {
@@ -1869,21 +2011,40 @@ public sealed class PushCombatMode : IBotMode
             $"hostiles {census.HostileAlive} ({census.Targetable} targetable, {census.Dormant} dormant, {census.Hazards} hazards, {census.Allies} allies)",
             $"target {(census.NearestTargetable.Length > 0 ? census.NearestTargetable : "-")}  blacklist {_coord.BlacklistCount}  doors {_usedTransitions.Count}  loot-mem {_lootMemory.Count}",
             $"mechanics shrine {mechanics.shrinesAvailable}/{mechanics.shrinesSeen}  altar {mechanics.altarsAvailable}/{mechanics.altarsSeen} taken {mechanics.altarsTaken}  ritual {mechanics.ritualFresh}/{mechanics.ritualActive}/{mechanics.ritualComplete}",
-            $"Delirium {_delirium.CurrentPhase}: {_delirium.LastDecision}  boss {_bossTracker.BossesDead}/{Math.Max(_bossTracker.BossesSeen, BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(ctx.Strategy?.Supply.Map.TargetMapName ?? "").Count)}",
+            $"Delirium {_delirium.CurrentPhase}: {_delirium.LastDecision}  boss {_bossTracker.BossesDead}/{Math.Max(_bossTracker.BossesSeen, BossFragmentsFor(MapNameFor(ctx)).Count)}",
             $"move: {(zoneFinished ? _transition.Name + ": " : "")}{_explore.Follow.LastDecision}",
         };
     }
 
     // ── Map mechanics ───────────────────────────────────────────────────────
 
+    private string MapNameFor(BehaviorContext ctx)
+        => !string.IsNullOrWhiteSpace(_atlasKnowledge?.CurrentMapName)
+            ? _atlasKnowledge.CurrentMapName
+            : ctx.Strategy?.Supply.Map.TargetMapName?.Trim() ?? "";
+
+    private IReadOnlyList<string> BossFragmentsFor(string mapName)
+        => MapBossCatalog.BossFragments(mapName)
+            .Concat(_atlasKnowledge?.BossFragments(mapName) ?? [])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private bool HasSeparateBossArenaFor(string mapName)
+        => MapBossCatalog.HasSeparateBossArena(mapName)
+            || _atlasKnowledge?.HasSeparateBossArena(mapName) == true;
+
     private void UpdateBossEvidence(BehaviorContext ctx)
     {
-        var mapName = ctx.Strategy?.Supply.Map.TargetMapName?.Trim() ?? "";
-        if (!mapName.Equals(_bossConfiguredMap, StringComparison.OrdinalIgnoreCase))
+        var mapName = MapNameFor(ctx);
+        var fragments = BossFragmentsFor(mapName);
+        var fragmentsKey = string.Join('\n', fragments.Order(StringComparer.OrdinalIgnoreCase));
+        if (!mapName.Equals(_bossConfiguredMap, StringComparison.OrdinalIgnoreCase)
+            || !fragmentsKey.Equals(_bossConfiguredFragmentsKey, StringComparison.Ordinal))
         {
             _bossConfiguredMap = mapName;
+            _bossConfiguredFragmentsKey = fragmentsKey;
             _bossClearCandidateSince = null;
-            _bossTracker.Configure(BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName));
+            _bossTracker.Configure(fragments);
         }
         if (!_bossTracker.HasExpectedBosses || ctx.Entities is null || ctx.Live is not { } live)
             return;

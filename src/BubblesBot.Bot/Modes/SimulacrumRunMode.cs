@@ -572,7 +572,8 @@ public sealed class SimulacrumRunMode : IBotMode
             var transition = _entryTransition.Observe(
                 ctx.Snapshot.AreaHash,
                 WorldAreaClassifier.Classify(ctx),
-                AreaTransitionTracker.MonotonicNow());
+                AreaTransitionTracker.MonotonicNow(),
+                TimeSpan.FromMilliseconds(LatencyPolicy.AllowanceMs(ctx.Settings)));
             if (transition.Outcome == AreaTransitionOutcome.Confirmed
                 || ShouldAttachFreshUnknownMap(transition))
             {

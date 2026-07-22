@@ -41,7 +41,8 @@ public sealed class AreaTransitionTracker
             0, AreaRole.Unknown, AreaTransitionOutcome.WaitingForChange, 0);
     }
 
-    public AreaTransitionState Observe(uint areaHash, AreaRole role, TimeSpan now)
+    public AreaTransitionState Observe(
+        uint areaHash, AreaRole role, TimeSpan now, TimeSpan? additionalEvidenceTime = null)
     {
         if (State.Outcome is AreaTransitionOutcome.Idle
             or AreaTransitionOutcome.Confirmed
@@ -58,6 +59,7 @@ public sealed class AreaTransitionTracker
             : role != AreaRole.Unknown
                 ? AreaTransitionOutcome.UnexpectedDestination
                 : now - _areaChangedAt.Value >= _destinationEvidenceTimeout
+                    + (additionalEvidenceTime ?? TimeSpan.Zero)
                     ? AreaTransitionOutcome.TimedOut
                     : AreaTransitionOutcome.VerifyingDestination;
 

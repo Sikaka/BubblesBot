@@ -2,6 +2,13 @@ using BubblesBot.Core.Game;
 
 namespace BubblesBot.Core.Snapshot;
 
+public enum DoorBlockageState
+{
+    Unknown,
+    Closed,
+    Open,
+}
+
 /// <summary>
 /// One ground-item label. The cheap fields (<see cref="LabelAddress"/>, <see cref="LabelElementAddress"/>,
 /// <see cref="ItemEntityAddress"/>) are populated when the label list is read. Everything else
@@ -44,6 +51,7 @@ public sealed class GroundLabelView
     // Used to denylist plain "Chest" entities so the loot key doesn't waste time on trash.
     private bool _outerCompsRead; private Dictionary<string, nint>? _outerComps;
     private bool _renderNameRead; private string _renderName = string.Empty;
+    private bool _doorStateRead; private DoorBlockageState _doorState;
 
     internal GroundLabelView(
         MemoryReader reader,
@@ -467,15 +475,54 @@ public sealed class GroundLabelView
         {
             if (_renderNameRead) return _renderName;
             _renderNameRead = true;
-            if (!_outerCompsRead)
-            {
-                _outerCompsRead = true;
-                if (ItemEntityAddress != 0)
-                    _outerComps = EntityComponents.ReadComponentMap(_reader, ItemEntityAddress);
-            }
-            if (_outerComps is { } c && c.TryGetValue("Render", out var rc) && rc != 0)
+            if (OuterComponents is { } c && c.TryGetValue("Render", out var rc) && rc != 0)
                 _renderName = NativeString.Read(_reader, rc + KnownOffsets.RenderComponent.Name);
             return _renderName;
+        }
+    }
+
+    /// <summary>
+    /// Live door state from <c>TriggerableBlockage.IsClosed</c>. Dungeon capture on
+    /// 2026-07-22 proved byte 1 while closed and 0 after the verified click; at the same edge
+    /// the movement terrain connected through the doorway. Missing components/read failures
+    /// remain <see cref="DoorBlockageState.Unknown"/> and must never authorize a click.
+    /// </summary>
+    public DoorBlockageState DoorState
+    {
+        get
+        {
+            if (_doorStateRead) return _doorState;
+            _doorStateRead = true;
+            if (OuterComponents is not { } components
+                || !components.TryGetValue("TriggerableBlockage", out var blockage)
+                || blockage == 0
+                || !_reader.TryReadStruct<byte>(
+                    blockage + KnownOffsets.TriggerableBlockageComponent.IsClosed,
+                    out var closed))
+                return _doorState = DoorBlockageState.Unknown;
+            return _doorState = closed switch
+            {
+                1 => DoorBlockageState.Closed,
+                0 => DoorBlockageState.Open,
+                _ => DoorBlockageState.Unknown,
+            };
+        }
+    }
+
+    public bool IsDoorIdentity
+        => Path.Contains("/Door", StringComparison.OrdinalIgnoreCase)
+           || DisplayName.Equals("Door", StringComparison.OrdinalIgnoreCase)
+           || RenderName.Equals("Door", StringComparison.OrdinalIgnoreCase);
+
+    private Dictionary<string, nint>? OuterComponents
+    {
+        get
+        {
+            if (_outerCompsRead) return _outerComps;
+            _outerCompsRead = true;
+            if (ItemEntityAddress != 0)
+                _outerComps = EntityComponents.ReadComponentMap(_reader, ItemEntityAddress);
+            return _outerComps;
         }
     }
 }

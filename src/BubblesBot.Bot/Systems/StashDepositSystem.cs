@@ -1,6 +1,7 @@
 using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Behaviors.Movement;
 using BubblesBot.Bot.Input;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Snapshot;
 
@@ -114,7 +115,8 @@ public sealed class StashDepositSystem
                  : CurrentPhase == Phase.Failed ? Result.Failed
                  : Result.InProgress;
 
-        if ((BotMonotonicClock.Now - _phaseStartedAt).TotalSeconds > PhaseTimeoutSeconds)
+        if ((BotMonotonicClock.Now - _phaseStartedAt).TotalSeconds
+            > LatencyPolicy.TimeoutSeconds(PhaseTimeoutSeconds, ctx.Settings))
             return Fail($"timeout in {CurrentPhase}: {Status}");
 
         if ((BotMonotonicClock.Now - _lastActionAt).TotalMilliseconds < ActionCooldownMs)
@@ -231,8 +233,9 @@ public sealed class StashDepositSystem
             return Advance(Phase.Deposit, "stash open - depositing");
         }
 
-        if (_clickAttempts >= MaxOpenClicks)
-            return Fail($"failed to open stash after {MaxOpenClicks} clicks");
+        var maxOpenClicks = LatencyPolicy.RetryLimit(MaxOpenClicks, ctx.Settings);
+        if (_clickAttempts >= maxOpenClicks)
+            return Fail($"failed to open stash after {maxOpenClicks} clicks");
 
         var stash = FindStash(ctx);
         if (stash is null)
@@ -254,7 +257,7 @@ public sealed class StashDepositSystem
         {
             _clickAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"clicked stash ({_clickAttempts}/{MaxOpenClicks})";
+            Status = $"clicked stash ({_clickAttempts}/{maxOpenClicks})";
         }
         return Result.InProgress;
     }
@@ -331,11 +334,13 @@ public sealed class StashDepositSystem
             _itemAttempts = 0;
         }
 
-        if (_itemAttempts >= MaxItemAttempts)
+        var maxItemAttempts = LatencyPolicy.RetryLimit(
+            MaxItemAttempts, ctx.Settings, maxExtraAttempts: 4);
+        if (_itemAttempts >= maxItemAttempts)
         {
             _blacklist.Add(_currentItemEntity);
             BubblesBot.Bot.Diagnostics.EventLog.Log("Stash",
-                $"blacklisted item 0x{(long)_currentItemEntity:X} (won't stash after {MaxItemAttempts} tries)");
+                $"blacklisted item 0x{(long)_currentItemEntity:X} (won't stash after {maxItemAttempts} tries)");
             _currentItemEntity = 0;
             return Result.InProgress;
         }

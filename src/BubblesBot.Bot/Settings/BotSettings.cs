@@ -18,6 +18,11 @@ public sealed class BotSettings
     [SettingRange(0, 1440, 15)]
     public int MaxRunMinutes { get; set; } = 0;
 
+    [Setting("General", "Action latency allowance (ms)",
+        "Extends overall UI, portal, and action-confirmation deadlines by this amount and grants bounded extra safe retries. Individual click validation receives at most 1000 ms extra so missed clicks still retry promptly. Use 2000-5000 ms for slower VMs or high-latency connections. 0 keeps normal timings.")]
+    [SettingRange(0, 10000, 250)]
+    public int ActionLatencyAllowanceMs { get; set; } = 0;
+
     /// <summary>
     /// Which production mode runs while armed. Overlay/manual keeps autonomous movement and
     /// combat off while retaining overlay, flask, and hold-to-loot assistance.

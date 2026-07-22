@@ -1,5 +1,6 @@
 using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Input;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Snapshot;
 
 namespace BubblesBot.Bot.Systems;
@@ -63,7 +64,8 @@ public sealed class StashTabSwitcher
             return Fail("stash is closed");
         if (_targetName.Length == 0)
             return Fail("target tab is empty");
-        if (BotMonotonicClock.ElapsedSince(_startedAt) > Timeout)
+        if (BotMonotonicClock.ElapsedSince(_startedAt).TotalSeconds
+            > LatencyPolicy.TimeoutSeconds(Timeout.TotalSeconds, ctx.Settings))
             return Fail($"timeout switching to '{_targetName}'");
 
         var catalog = ctx.Snapshot.StashTabs;
@@ -103,7 +105,8 @@ public sealed class StashTabSwitcher
             Status = "waiting for visible stash index";
             return Result.InProgress;
         }
-        if (_clickAttempts >= MaxClickAttempts)
+        var maxClickAttempts = LatencyPolicy.RetryLimit(MaxClickAttempts, ctx.Settings);
+        if (_clickAttempts >= maxClickAttempts)
             return Fail($"click limit selecting '{target.Name}' from index {current}");
         if (BotMonotonicClock.ElapsedSince(_lastActionAt).TotalMilliseconds < 250)
             return Result.InProgress;
@@ -179,7 +182,7 @@ public sealed class StashTabSwitcher
             _hoverCandidateIndex = (_hoverCandidateIndex + 1) % candidates.Length;
             _hoverTarget = 0;
             _hoverStartedAt = TimeSpan.MinValue;
-            Status = $"selecting '{target.Name}' from index {current} ({_clickAttempts}/{MaxClickAttempts})";
+            Status = $"selecting '{target.Name}' from index {current} ({_clickAttempts}/{maxClickAttempts})";
         }
         return Result.InProgress;
     }

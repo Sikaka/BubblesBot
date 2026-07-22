@@ -34,7 +34,15 @@ public sealed class ExploreFrontier : IBehavior
     {
         var live = ctx.Live;
         if (live is not null) _exploration.TrackVisit(ctx.Snapshot, live.Value.GridPosition);
-        return LastStatus = _follow.Tick(ctx);
+        var goalBeforeTick = _exploration.CurrentFrontierGoal;
+        var status = _follow.Tick(ctx);
+        if (status == BehaviorStatus.Failure
+            && (goalBeforeTick ?? _exploration.CurrentFrontierGoal) is { } failedGoal)
+        {
+            _exploration.ReportPathFailure(failedGoal);
+            _follow.Reset();
+        }
+        return LastStatus = status;
     }
 
     public void Reset() { _follow.Reset(); LastStatus = BehaviorStatus.Failure; }

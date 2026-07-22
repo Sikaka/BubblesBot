@@ -1,4 +1,5 @@
 using BubblesBot.Bot.Systems;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Pathfinding;
 using BubblesBot.Core.Snapshot;
@@ -108,6 +109,8 @@ public sealed class LootClosestVisible : IBehavior
 
     public BehaviorStatus Tick(BehaviorContext ctx)
     {
+        var maxAttemptsBeforeBlacklist = LatencyPolicy.RetryLimit(
+            MaxAttemptsBeforeBlacklist, ctx.Settings, maxExtraAttempts: 4);
         FinalizePendingPickup();
         _interact.Tick();
 
@@ -306,7 +309,7 @@ public sealed class LootClosestVisible : IBehavior
             // instead of stalling the sweep; layouts shift as the bot moves, so early attempts
             // often free up.
             _attemptsOnTarget++;
-            if (_attemptsOnTarget >= MaxAttemptsBeforeBlacklist)
+            if (_attemptsOnTarget >= maxAttemptsBeforeBlacklist)
             {
                 _blacklist.Add(targetAddr);
                 LastDecision = $"blacklisted {bestKind} {ShortPath(displayPath)} — label fully covered";
@@ -344,7 +347,7 @@ public sealed class LootClosestVisible : IBehavior
         }
 
         _attemptsOnTarget++;
-        if (_attemptsOnTarget >= MaxAttemptsBeforeBlacklist)
+        if (_attemptsOnTarget >= maxAttemptsBeforeBlacklist)
         {
             // The verify predicate fires when the label disappears — if we hit the cap, the
             // last N clicks were all timeouts (label still present). Blacklist for the area.

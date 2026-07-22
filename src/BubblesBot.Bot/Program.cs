@@ -82,7 +82,7 @@ if (liveTestOptions.Command == LiveTestCommand.Run)
 // ── Run ───────────────────────────────────────────────────────────────────
 
 Console.WriteLine("Starting bot. Configure via web UI at http://localhost:5666");
-Console.WriteLine("Press Insert in-game to ARM/DISARM. Press Ctrl+C in this terminal to exit.");
+Console.WriteLine("Press Insert in-game to ARM/DISARM. Press F12 to hide/show the overlay. Press Ctrl+C in this terminal to exit.");
 
 using var app = new BotApp(process, reader, ingameDataAddr, ingameStateAddr, theGameSlots);
 

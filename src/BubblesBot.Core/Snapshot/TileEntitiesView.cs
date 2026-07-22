@@ -62,7 +62,12 @@ public sealed class TileEntitiesView
         if (areaHash == 0) return Empty;
         lock (_cacheLock)
         {
-            if (_cached is not null && _cached.AreaHash == areaHash) return _cached;
+            // Like TileMapView, the array can be structurally present one tick before the
+            // per-tile entity vectors hydrate. Retry an empty-but-sized capture instead of
+            // poisoning the area cache until the next transition.
+            if (_cached is not null && _cached.AreaHash == areaHash
+                && (_cached._entries.Count > 0 || _cached.TileCount == 0 || _cached.LoadError.Length > 0))
+                return _cached;
             _cached = Load(reader, ingameDataAddress, areaHash);
             return _cached;
         }

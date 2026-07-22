@@ -5,6 +5,9 @@ public static class LiveTestRegistry
     private static readonly IReadOnlyList<ILiveTestCase> Registered =
     [
         new StateInspectionLiveTest(),
+        new MapLandmarkInspectLiveTest(),
+        new MapDoorInspectLiveTest(),
+        new MapDoorOpenLiveTest(),
         new PassiveTreeInspectLiveTest(),
         new PassiveAllocateLiveTest(),
         new InventoryRoundTripLiveTest(),

@@ -69,6 +69,7 @@ public sealed class InteractWorldEntity : IBehavior
 
     public BehaviorStatus Tick(BehaviorContext ctx)
     {
+        var maxClickAttempts = LatencyPolicy.RetryLimit(MaxClickAttempts, ctx.Settings);
         var target = _targetSelector(ctx);
         if (target is null) { LastDecision = "no target"; return LastStatus = BehaviorStatus.Failure; }
 
@@ -139,15 +140,15 @@ public sealed class InteractWorldEntity : IBehavior
             // cause the click to land on the wrong screen pixel.
             if (BotMonotonicClock.ElapsedSince(_lastClickAt).TotalMilliseconds < ClickThrottleMs)
             {
-                LastDecision = $"throttled ({_attempts}/{MaxClickAttempts})";
+                LastDecision = $"throttled ({_attempts}/{maxClickAttempts})";
                 return LastStatus = BehaviorStatus.Running;
             }
-            if (_attempts >= MaxClickAttempts)
+            if (_attempts >= maxClickAttempts)
             {
                 if (_retryUntilActivated)
                 {
                     BubblesBot.Bot.Diagnostics.EventLog.Log(Name,
-                        $"target id={target.Id} still available after {MaxClickAttempts} clicks; starting another verified retry cycle");
+                        $"target id={target.Id} still available after {maxClickAttempts} clicks; starting another verified retry cycle");
                     _attempts = 0;
                     _enteredRangeAt = BotMonotonicClock.Now;
                     LastDecision = $"retrying persistent target id={target.Id}";
@@ -164,7 +165,7 @@ public sealed class InteractWorldEntity : IBehavior
             {
                 _lastClickAt = BotMonotonicClock.Now;
                 _attempts++;
-                BubblesBot.Bot.Diagnostics.EventLog.Log(Name, $"click sent abs=({clickPoint.Value.X},{clickPoint.Value.Y}) attempt {_attempts}/{MaxClickAttempts}");
+                BubblesBot.Bot.Diagnostics.EventLog.Log(Name, $"click sent abs=({clickPoint.Value.X},{clickPoint.Value.Y}) attempt {_attempts}/{maxClickAttempts}");
                 LastDecision = $"clicked {target.Path} (attempt {_attempts})";
             }
             else

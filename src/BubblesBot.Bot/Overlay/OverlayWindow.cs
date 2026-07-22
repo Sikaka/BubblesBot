@@ -44,6 +44,7 @@ public sealed class OverlayWindow : IDisposable
     public int OriginX { get; private set; }
     public int OriginY { get; private set; }
     public bool IsValid => _hwnd != 0 && _renderTarget != null;
+    public bool IsVisible { get; private set; } = true;
 
     /// <summary>
     /// The render target. Same shape as before (ID2D1RenderTarget) but backed by the DIB
@@ -209,6 +210,14 @@ public sealed class OverlayWindow : IDisposable
         {
             OverlayNative.ReleaseDC(0, screenDC);
         }
+    }
+
+    /// <summary>Hide/show the overlay HWND without disturbing rendering or bot operation.</summary>
+    public void SetVisible(bool visible)
+    {
+        if (_hwnd == 0 || IsVisible == visible) return;
+        OverlayNative.ShowWindow(_hwnd, visible ? OverlayNative.SW_SHOW : OverlayNative.SW_HIDE);
+        IsVisible = visible;
     }
 
     /// <summary>Track the PoE window's screen rect; resize backing bitmap if dimensions changed.</summary>

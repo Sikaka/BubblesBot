@@ -29,6 +29,7 @@ public sealed class LiveTestContext
     public string EvidenceDirectory => _recorder.EvidenceDirectory;
     public GameStateKind GameState => _gameState.ReadKind();
     public WindowInfo Window => ReadWindow();
+    internal MemoryReader Reader => _reader;
 
     internal LiveTestContext(
         MemoryReader reader,

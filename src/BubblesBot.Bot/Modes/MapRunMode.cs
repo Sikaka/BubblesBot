@@ -141,7 +141,8 @@ public sealed class MapRunMode : IBotMode
     public MapRunMode(SettingsStore settings, CombatCoordinator coord, StrategyStore strategies,
         Func<GameSnapshot?> getSnapshot,
         Func<LivePlayer?> getLive, Func<EntityCache?> getEntities,
-        Diagnostics.IRunReporter reporter, Func<LootLedger.SnapshotData> getLoot)
+        Diagnostics.IRunReporter reporter, Func<LootLedger.SnapshotData> getLoot,
+        Knowledge.AtlasMapKnowledgeObserver? atlasKnowledge = null)
     {
         _settings    = settings;
         _strategies  = strategies;
@@ -161,7 +162,8 @@ public sealed class MapRunMode : IBotMode
                 inventory.Items, item, _activeStrategy));
         _supplyTabSwitcher = new StashTabSwitcher(getSnapshot);
         _mapFarming  = new PushCombatMode(settings, coord, getSnapshot, getLive, getEntities,
-            orchestrated: true, getStrategy: () => _activeStrategy);
+            orchestrated: true, getStrategy: () => _activeStrategy,
+            atlasKnowledge: atlasKnowledge);
         _returnThroughCheckpoint = new EnterAreaTransition(
             "return through boss checkpoint portal", _interact, _movement, _skills,
             getSnapshot,
@@ -575,7 +577,8 @@ public sealed class MapRunMode : IBotMode
     {
         _lifecyclePhase = MapRunPhase.Entry;
         var transition = _entryTransition.Observe(
-            ctx.Snapshot.AreaHash, WorldAreaClassifier.Classify(ctx), AreaTransitionTracker.MonotonicNow());
+            ctx.Snapshot.AreaHash, WorldAreaClassifier.Classify(ctx), AreaTransitionTracker.MonotonicNow(),
+            TimeSpan.FromMilliseconds(LatencyPolicy.AllowanceMs(ctx.Settings)));
         if (transition.Outcome == AreaTransitionOutcome.Confirmed)
         {
             ResetSubsystems();

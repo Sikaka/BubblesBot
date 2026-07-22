@@ -2,6 +2,7 @@ using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Behaviors.Movement;
 using BubblesBot.Bot.Behaviors.Interact;
 using BubblesBot.Bot.Modes;
+using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Snapshot;
 
@@ -134,7 +135,8 @@ public sealed class LeaveMapSystem
             ? AreaRole.SafeHub
             : WorldAreaClassifier.Classify(ctx);
         var transition = _transition.Observe(
-            ctx.Snapshot.AreaHash, observedRole, AreaTransitionTracker.MonotonicNow());
+            ctx.Snapshot.AreaHash, observedRole, AreaTransitionTracker.MonotonicNow(),
+            TimeSpan.FromMilliseconds(LatencyPolicy.AllowanceMs(ctx.Settings)));
         if (transition.Outcome == AreaTransitionOutcome.Confirmed)
         {
             _movement.Release();
@@ -167,7 +169,8 @@ public sealed class LeaveMapSystem
             Phase.ReturnToEntrance => ReturnTimeoutSeconds,
             _ => PhaseTimeoutSeconds,
         };
-        if ((BotMonotonicClock.Now - _phaseStartedAt).TotalSeconds > timeout)
+        if ((BotMonotonicClock.Now - _phaseStartedAt).TotalSeconds
+            > LatencyPolicy.TimeoutSeconds(timeout, ctx.Settings))
             return Fail($"timeout in {CurrentPhase}: {Status}");
 
         if ((BotMonotonicClock.Now - _lastActionAt).TotalMilliseconds < ActionCooldownMs)
@@ -205,7 +208,8 @@ public sealed class LeaveMapSystem
             return Advance(Phase.EnterPortal, $"town portal id={portal.Id} — entering");
         }
 
-        if (_castAttempts >= MaxCastAttempts)
+        var maxCastAttempts = LatencyPolicy.RetryLimit(MaxCastAttempts, ctx.Settings);
+        if (_castAttempts >= maxCastAttempts)
         {
             return TickCastFromInventory(ctx);
         }
@@ -219,7 +223,7 @@ public sealed class LeaveMapSystem
         {
             _castAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"tapped portal key ({_castAttempts}/{MaxCastAttempts})";
+            Status = $"tapped portal key ({_castAttempts}/{maxCastAttempts})";
             BubblesBot.Bot.Diagnostics.EventLog.Log("LeaveMap", $"portal key tapped (vk=0x{vk:X})");
         }
         return Result.InProgress;
@@ -259,7 +263,9 @@ public sealed class LeaveMapSystem
                     "no Portal Scroll - returning to the original map entrance");
             return Fail("portal hotkey failed and no carried Portal Scroll was visible");
         }
-        if (_inventoryScrollAttempts >= MaxInventoryScrollAttempts)
+        var maxInventoryScrollAttempts = LatencyPolicy.RetryLimit(
+            MaxInventoryScrollAttempts, ctx.Settings, maxExtraAttempts: 4);
+        if (_inventoryScrollAttempts >= maxInventoryScrollAttempts)
         {
             LogPortalCensus(ctx);
             return Fail("carried Portal Scroll did not create a town portal");
@@ -275,7 +281,7 @@ public sealed class LeaveMapSystem
         {
             _inventoryScrollAttempts++;
             _lastActionAt = BotMonotonicClock.Now;
-            Status = $"right-clicked carried Portal Scroll ({_inventoryScrollAttempts}/{MaxInventoryScrollAttempts})";
+            Status = $"right-clicked carried Portal Scroll ({_inventoryScrollAttempts}/{maxInventoryScrollAttempts})";
         }
         return Result.InProgress;
     }
@@ -338,7 +344,8 @@ public sealed class LeaveMapSystem
             Status = "at original map entrance - waiting for portal to stream";
             return Result.InProgress;
         }
-        if ((BotMonotonicClock.Now - _returnAnchorReachedAt).TotalSeconds >= 5)
+        if ((BotMonotonicClock.Now - _returnAnchorReachedAt).TotalSeconds
+            >= LatencyPolicy.TimeoutSeconds(5, ctx.Settings))
             return Fail("reached original map entrance but its return portal was absent");
         return Result.InProgress;
     }
