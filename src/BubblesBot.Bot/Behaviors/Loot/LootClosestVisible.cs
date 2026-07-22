@@ -149,7 +149,11 @@ public sealed class LootClosestVisible : IBehavior
             var outerPath = label.Path;
             var isItem  = label.IsItem;
             var isChest = !isItem && outerPath.StartsWith("Metadata/Chests/", StringComparison.Ordinal);
-            var isDoor  = !isItem && !isChest && outerPath.Contains("/Door", StringComparison.OrdinalIgnoreCase);
+            // Some map gates use a generic MiscellaneousObjects path and expose their
+            // actionable identity only as the visible ground-label text "Door". Treat that
+            // exact label as a door too; transition portals remain excluded.
+            var isDoor  = !isItem && !isChest && IsDoorIdentity(
+                outerPath, label.IsLabelVisible ? label.DisplayName : string.Empty);
             if (!isItem && !isChest && !isDoor) continue;
             targets++;
 
@@ -207,7 +211,7 @@ public sealed class LootClosestVisible : IBehavior
             // first, then click only when the straight segment is usable.
             if (label.EntityGridPosition is not { } labelGrid) continue;
             var targeting = snap.Nav.TargetingReader;
-            if (!BypassTerrainLineOfSight
+            if (!isDoor && !BypassTerrainLineOfSight
                 && targeting is not null
                 && !PathSmoother.HasLineOfSight(targeting,
                     player.GridPosition.X, player.GridPosition.Y,
@@ -354,6 +358,10 @@ public sealed class LootClosestVisible : IBehavior
         LastDecision = $"clicked {bestKind} {ShortPath(displayPath)} d={bestDist:F1} attempt {_attemptsOnTarget}{reasonNote}";
         return LastStatus = BehaviorStatus.Running;
     }
+
+    internal static bool IsDoorIdentity(string path, string displayName)
+        => path.Contains("/Door", StringComparison.OrdinalIgnoreCase)
+        || displayName.Equals("Door", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether this label was written off after repeated failed clicks — shared with
     /// the mode's sweep gate so it doesn't keep steering toward a label we gave up on.</summary>

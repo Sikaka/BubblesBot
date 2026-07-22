@@ -34,6 +34,22 @@ public static class MapBossCatalog
                 "Metadata/Monsters/Bandits/MapBanditBossHeavyStrike",
                 "Metadata/Monsters/BanditLeaderDexInt/MapBanditLeaderKraityn",
             ],
+            ["Forge of the Phoenix"] =
+            [
+                "Metadata/Monsters/AtlasBosses/PhoenixBoss",
+            ],
+            ["Maze of the Minotaur"] =
+            [
+                "Metadata/Monsters/AtlasBosses/MinotaurBoss",
+            ],
+            ["Pit of the Chimera"] =
+            [
+                "Metadata/Monsters/AtlasBosses/ChimeraBoss",
+            ],
+            ["Lair of the Hydra"] =
+            [
+                "Metadata/Monsters/AtlasBosses/HydraBoss",
+            ],
         };
 
     // Maps whose required boss is reached through an in-map area transition. This is separate
@@ -45,7 +61,14 @@ public static class MapBossCatalog
     // roster is dead, remaining reveal is disconnected-arena accounting or backward travel,
     // not useful map progress.
     private static readonly HashSet<string> TerminalBossMaps =
-        new(StringComparer.OrdinalIgnoreCase) { "Strand" };
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Strand",
+            "Forge of the Phoenix",
+            "Maze of the Minotaur",
+            "Pit of the Chimera",
+            "Lair of the Hydra",
+        };
 
     public static bool HasEntry(string mapName) => Bosses.ContainsKey(mapName.Trim());
 

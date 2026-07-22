@@ -37,6 +37,7 @@ public sealed class MapDeviceAccessPolicyTests
     [Theory]
     [InlineData(25, 37)]
     [InlineData(38, 45)]
+    [InlineData(50, 45)]
     public void Portal_click_range_accounts_for_collision_ring(float configured, float expected)
         => Assert.Equal(expected, MapPortalEntryPolicy.ClickRange(configured));
 

@@ -94,6 +94,13 @@ public sealed class EntityCache
         public nint ChestCompAddr;
         public nint BuffsCompAddr;
         public nint ShrineCompAddr;
+        public nint AreaTransitionCompAddr;
+        /// <summary>True only when the typed AreaTransition component was read successfully.</summary>
+        public bool AreaTransitionIdentityReadable;
+        public AreaTransitionType AreaTransitionType;
+        public ushort AreaTransitionAreaId;
+        public string DestinationAreaId = string.Empty;
+        public string DestinationAreaName = string.Empty;
         /// <summary>Display name from Render component (e.g. "Carius, the Unnatural"). Empty for unnamed mobs.</summary>
         public string Name = string.Empty;
 
@@ -311,9 +318,12 @@ public sealed class EntityCache
                     entry = fresh;
                 }
             }
-            else if (entry.StateMachineCompAddr == 0
+            else if ((entry.StateMachineCompAddr == 0 && NeedsStateMachine(entry.Path)
+                    || entry.Kind == EntityListReader.EntityKind.AreaTransition
+                       && (!entry.AreaTransitionIdentityReadable
+                           || entry.AreaTransitionCompAddr == 0))
                 && entry.HydrationRetries < MaxComponentRehydrateAttempts
-                && NeedsStateMachine(entry.Path))
+                )
             {
                 // Same streaming race, partial flavor: the component map read missed
                 // StateMachine, and frozen at 0 it leaves ritual/pump/altar state Unknown
@@ -323,7 +333,10 @@ public sealed class EntityCache
                 // that genuinely lack the component stop costing reads.
                 entry.HydrationRetries++;
                 var fresh = TryHydrate(addr, id);
-                if (fresh is not null && fresh.StateMachineCompAddr != 0)
+                if (fresh is not null
+                    && (fresh.StateMachineCompAddr != 0
+                        || fresh.Kind == EntityListReader.EntityKind.AreaTransition
+                           && fresh.AreaTransitionIdentityReadable))
                 {
                     _byId[id] = fresh;
                     entry = fresh;
@@ -460,6 +473,7 @@ public sealed class EntityCache
         => path.Contains("/Ritual/RitualRuneInteractable", StringComparison.Ordinal)
         || path.EndsWith("/BlightPump", StringComparison.Ordinal)
         || path.EndsWith("/Affliction/AfflictionInitiator", StringComparison.Ordinal)
+        || path.EndsWith("/MapAtlasMaven/Objects/MavenBossRushObject", StringComparison.Ordinal)
         || path.Contains("PrimordialBosses/TangleAltar", StringComparison.Ordinal)
         || path.Contains("PrimordialBosses/CleansingFireAltar", StringComparison.Ordinal);
 
@@ -496,6 +510,18 @@ public sealed class EntityCache
             components.TryGetValue("Chest",        out entry.ChestCompAddr);
             components.TryGetValue("Buffs",        out entry.BuffsCompAddr);
             components.TryGetValue("Shrine",       out entry.ShrineCompAddr);
+            components.TryGetValue("AreaTransition", out entry.AreaTransitionCompAddr);
+
+            if (entry.AreaTransitionCompAddr != 0
+                && AreaTransitionIdentityReader.TryRead(
+                    _reader, entry.AreaTransitionCompAddr, out var transitionIdentity))
+            {
+                entry.AreaTransitionIdentityReadable = true;
+                entry.AreaTransitionType = transitionIdentity.Type;
+                entry.AreaTransitionAreaId = transitionIdentity.AreaId;
+                entry.DestinationAreaId = transitionIdentity.DestinationAreaId;
+                entry.DestinationAreaName = transitionIdentity.DestinationAreaName;
+            }
 
             // Display name (Render +0x148 NativeString). Frozen — names don't change for an
             // entity's lifetime. Unique/rare mobs get this; trash returns empty.

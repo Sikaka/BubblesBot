@@ -6,7 +6,7 @@ namespace BubblesBot.Core;
 /// When the string is longer than 7 chars, the inline buffer holds a pointer to heap data
 /// instead. Reads always go via this helper so the SSO branch is handled in one place.
 ///
-/// <para>Validated 2026-05-06 against player name (BawdyLotionMirage = 17 chars → heap),
+/// <para>Validated 2026-05-06 against a 17-character player name (heap storage),
 /// 2026-05-07 against unique-monster RenderName (heap-style for long names).</para>
 /// </summary>
 public static class NativeString

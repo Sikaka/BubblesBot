@@ -7,6 +7,7 @@ using BubblesBot.Bot.Input;
 using BubblesBot.Bot.Settings;
 using BubblesBot.Bot.Systems;
 using BubblesBot.Core.Game;
+using BubblesBot.Core.Knowledge;
 using BubblesBot.Core.Snapshot;
 
 namespace BubblesBot.Bot.Modes;
@@ -57,9 +58,12 @@ public sealed class PushCombatMode : IBotMode
     private readonly LootClosestVisible _loot;
     private readonly EnterAreaTransition _transition;
     private readonly EnterAreaTransition _completedBossArenaExit;
+    private readonly BossCheckpointPortalSystem _bossCheckpointPortal;
+    private readonly FollowPath          _bossCheckpointApproach;
     private readonly FollowPath          _bossArenaSearch;
     private readonly FollowPath          _bossArenaInward;
     private readonly FollowPath          _visibleBossApproach;
+    private readonly FollowPath          _chimeraRevealApproach;
     private readonly LootMemory        _lootMemory = new();
     private readonly FollowPath        _lootReturn;
     private readonly FollowPath        _lootApproach;
@@ -109,16 +113,27 @@ public sealed class PushCombatMode : IBotMode
     private readonly RitualPriorityTracker _ritualPriority = new();
     private readonly BossEvidenceTracker _bossTracker = new();
     private string _bossConfiguredMap = "";
+    private TimeSpan? _bossClearCandidateSince;
     private readonly HashSet<uint> _deliriumDriveBySkipped = new();
     private TimeSpan _deliriumPackEnteredAt = TimeSpan.MinValue;
     private Vector2i? _deliriumPackAnchor;
     private bool _bossArenaEntered;
+    private Vector2i? _bossCheckpointGoal;
+    private bool _bossCheckpointRecoveryPending;
     private string? _requestedAbandonReason;
     private Vector2i? _bossArenaSearchGoal;
+    private bool _bossArenaLandmarkRejected;
     private Vector2i? _bossArenaInwardGoal;
     private Vector2i _bossArenaEntryGrid;
     private int _bossArenaInwardAttempt;
     private Vector2i? _visibleBossGoal;
+    private TimeSpan _lastVisibleBossUnreachableAt = TimeSpan.MinValue;
+    private Vector2i? _chimeraRevealAnchor;
+    private Vector2i? _chimeraRevealGoal;
+    private int _chimeraRevealAttempt;
+    private bool _chimeraRevealGoalIsCloud;
+    private readonly HashSet<Vector2i> _chimeraCloudsVisited = new();
+    private Vector2i? _persistentTraversalOrigin;
     private const int RitualTimeoutSeconds = 180;
     private const float RitualLeashRadius = 45f;
     private const float RitualStragglerRadius = 150f;
@@ -133,6 +148,9 @@ public sealed class PushCombatMode : IBotMode
     private const float RitualLootDrainRadius = 60f;
     private const int LootReturnNoProgressSeconds = 15;
     private const double ProximityDamageEvidenceMs = 4000;
+    private const float BossCheckpointStagingDistanceGrid = 32f;
+    private const float BossCheckpointSafetyRadiusGrid = 55f;
+    private const double BossClearSettleSeconds = 8.0;
 
     public string Name => "Map farming";
     public IBehavior Root => _root;
@@ -148,7 +166,12 @@ public sealed class PushCombatMode : IBotMode
     /// <summary>Short status lines for the on-screen overlay HUD. Rebuilt each tick.</summary>
     public IReadOnlyList<string> HudLines { get; private set; } = Array.Empty<string>();
     public bool IsCleared { get; private set; }
+    public bool BossCheckpointPortalReady => _bossCheckpointPortal.IsReady;
     public string? RequestedAbandonReason => _requestedAbandonReason;
+    public Vector2i? TraversalOrigin => _persistentTraversalOrigin;
+
+    public void SetTraversalOrigin(Vector2i? origin)
+        => _persistentTraversalOrigin = origin;
 
     public PushCombatMode(SettingsStore settings, CombatCoordinator coord,
         Func<GameSnapshot?> getSnapshot, Func<LivePlayer?> getLive,
@@ -168,10 +191,22 @@ public sealed class PushCombatMode : IBotMode
         _explore     = new ExploreFrontier("push-explore", _exploration, _movement, _skills);
         _loot        = new LootClosestVisible("loot closest", _interact, getSnapshot);
         _transition  = new EnterAreaTransition("next zone", _interact, _movement, _skills,
-            getSnapshot, TransitionEligible);
+            getSnapshot, TransitionEligible,
+            fallbackGrid: _ => _transitGoal,
+            fallbackLabelFilter: IsArenaLabel);
         _completedBossArenaExit = new EnterAreaTransition(
             "completed boss arena exit", _interact, _movement, _skills,
-            getSnapshot, CompletedBossArenaExitTransitionEligible);
+            getSnapshot, CompletedBossArenaExitTransitionEligible,
+            // Arena exits are local doors. Letting A* invent a Blink Arrow gap step caused an
+            // endless cast loop 52 grids from a fresh Strand exit; route around on foot.
+            allowGapCrossing: false);
+        _bossCheckpointPortal = new BossCheckpointPortalSystem(
+            _movement, () => _settings.Current.StackedDeckPortalKeyVk, getEntities, getLive);
+        _bossCheckpointApproach = new FollowPath(
+            "stage for boss checkpoint portal", _movement,
+            _ => _bossCheckpointGoal, _skills,
+            goalArrivalRadius: BossCheckpointStagingDistanceGrid,
+            allowGapCrossing: false);
         _bossArenaSearch = new FollowPath("seek boss arena", _movement,
             _ => _bossArenaSearchGoal, _skills, goalArrivalRadius: 18f);
         _bossArenaInward = new FollowPath("stage inside boss arena", _movement,
@@ -180,6 +215,10 @@ public sealed class PushCombatMode : IBotMode
         _visibleBossApproach = new FollowPath("approach required boss", _movement,
             _ => _visibleBossGoal, _skills,
             goalArrivalRadiusProvider: ctx => Math.Max(24f, ctx.Settings.ProximityHoldRadiusGrid * 0.75f));
+        _chimeraRevealApproach = new FollowPath("reveal dormant Chimera", _movement,
+            _ => _chimeraRevealGoal, _skills,
+            goalArrivalRadius: 5f,
+            allowGapCrossing: false);
         // Pack-beacons share the blacklist too — otherwise the end-of-zone mop-up would
         // walk back to an essence pack the engage branch just gave up on.
         _exploration.BeaconSkip = IsBlacklisted;
@@ -218,7 +257,7 @@ public sealed class PushCombatMode : IBotMode
         _ritualShop = new RitualShopController(getSnapshot);
         _ultimatum = new UltimatumMode(settings, getSnapshot, getLive, getEntities,
             exitWhenDone: false, getStrategy: _getStrategy);
-        _delirium = new DeliriumController(_movement, _skills, getSnapshot);
+        _delirium = new DeliriumController(_movement, _skills, _loot, getSnapshot);
         _ritualEngage = new FollowPath("ritual engage", _movement,
             ctx => _ritualMoveGoal, _skills,
             goalArrivalRadiusProvider: ctx => ctx.Settings.ProximityHoldRadiusGrid);
@@ -256,7 +295,18 @@ public sealed class PushCombatMode : IBotMode
                 _takePriorityShrine),
             new If("active ritual", HasActiveRitual,
                 new Behaviors.Action("ritual encounter", RitualTick)),
+            // Flicker Strike must remain held through ordinary packs, boss phases, and low-HP
+            // pressure: attacking is what teleports/leaches. Generic retreat would cancel the
+            // build's survival loop and strand it among Chimera adds.
+            new If("flicker engage", ShouldEngageFlicker,
+                new Behaviors.Action("hold Flicker Strike", FlickerEngageTick)),
             new If("low HP", LowHp, new Behaviors.Action("retreat", RetreatTick)),
+            // A ranged character must stop and establish fire before any optional world
+            // interaction can pull it through a pack. Modal encounter handling and the HP
+            // retreat stay above this; loot, shrines, altars, and exploration stay below it.
+            new If("ranged engage",
+                ShouldEngageRanged,
+                new Behaviors.Action("ranged standoff", RangedEngageTick)),
             new If("ritual loot settle", _ => _ritualLootAnchor is not null,
                 new Behaviors.Action("ritual loot", RitualLootTick)),
             // A manually opened/recovered Favours window is modal: finish or close it
@@ -289,8 +339,16 @@ public sealed class PushCombatMode : IBotMode
             // Known boss-arena maps may expose their final door before the current terrain scan
             // declares every frontier exhausted. Once the door is local, enter it: boss evidence
             // remains the whole-map completion gate, so this cannot falsely finish the map.
+            new If("place boss checkpoint portal", ShouldPlaceBossCheckpointPortal,
+                new Behaviors.Action("boss checkpoint portal", BossCheckpointPortalTick)),
             new If("enter required boss arena", ShouldEnterRequiredBossArena,
                 new Behaviors.Action("boss arena transition", BossArenaTransitionTick)),
+            // Chimera's smoke phase leaves the living boss entity fresh but Dormant. Once the
+            // add wave is actually gone, walking through his current position reveals him.
+            // Active adds always retain priority, preventing the dormant actor from stealing
+            // combat control during the preceding wave.
+            new If("reveal dormant Chimera", ShouldRevealDormantChimera,
+                new Behaviors.Action("Chimera smoke search", ChimeraRevealTick)),
             // Same-hash boss arenas do not reset the main-zone exploration cache. Once a
             // positively identified required boss streams in, route to that entity directly;
             // otherwise a proximity build can stand at the entrance outside engage range while
@@ -302,9 +360,15 @@ public sealed class PushCombatMode : IBotMode
             // visible, then let the exact-identity approach branch above take control.
             new If("stage inside required boss arena", ShouldStageInsideBossArena,
                 new Behaviors.Action("boss arena inward stage", BossArenaInwardTick)),
-            // Boss loot has already had first refusal above. Once the entire configured
-            // arena roster is dead, take the arena exit instead of exploring this small,
-            // disconnected sub-area as though it were the parent map.
+            // Finish Delirium while we are still in the boss room: click End, hold the delayed
+            // reward barrier, and let the higher-priority local loot branch drain the drops.
+            // Only then may the arena-exit branch below return to the parent map.
+            new If("Delirium finalization",
+                ctx => _delirium.ShouldFinalize(ctx, ObjectivesComplete(ctx)),
+                new Behaviors.Action("end Delirium and settle rewards", _delirium.FinalizeTick)),
+            // Boss and Delirium loot have already had first refusal above. Once the configured
+            // roster is dead and Delirium is settled, take the arena exit instead of exploring
+            // this small, disconnected sub-area as though it were the parent map.
             new If("exit completed boss arena", ShouldExitCompletedBossArena,
                 new Behaviors.Action("completed boss arena exit", CompletedBossArenaExitTick)),
             // Late in a separate-arena map, the tile landmark is a better objective than
@@ -312,20 +376,12 @@ public sealed class PushCombatMode : IBotMode
             // which the branch above owns navigation and the verified click.
             new If("seek required boss arena", ShouldSeekRequiredBossArena,
                 new Behaviors.Action("boss arena search", BossArenaSearchTick)),
-            // Map completion first ends the encounter, then holds a delayed-reward barrier.
-            // Visible rewards are still collected by the higher-priority loot branch above.
-            new If("Delirium finalization",
-                ctx => _delirium.ShouldFinalize(ctx, ObjectivesComplete(ctx)),
-                new Behaviors.Action("end Delirium and settle rewards", _delirium.FinalizeTick)),
             // Only exploration/backtracking is paced. Combat, incidental mechanics, and local
             // loot above this branch can always preempt the hold.
             new If("Delirium fog-front hold", _delirium.ShouldThrottle,
                 new Behaviors.Action("wait for Delirium fog front", _delirium.ThrottleTick)),
             new If("refresh ritual state", ShouldRefreshRitual,
                 new Behaviors.Action("ritual refresh", RefreshRitualTick)),
-            new If("drain remembered loot", ctx => _lootMemory.Count > 0
-                    && !_delirium.SuppressBacktracking && !BossHuntActive(ctx),
-                new Behaviors.Action("loot backtrack", DrainRememberedLootTick)),
             new If("ritual rewards", ShouldHandleRitualShop,
                 new Behaviors.Action("Ritual Favours", RitualShopTick)),
             new If("engage pack",
@@ -348,9 +404,27 @@ public sealed class PushCombatMode : IBotMode
     // Map-lifecycle policy stays here: a map that forces the emergency douse twice isn't worth
     // the corpse run (see Tick — the coordinator surfaces the douse-confirmed edge).
     private int _mapDouses;
+    private bool _rangedEngagedThisTick;
 
     private BehaviorStatus ProximityEngageTick(BehaviorContext ctx)
         => _coord.ProximityEngageTick(ctx, _delirium.IsEncounterActive, DeliriumTargetSkipped);
+
+    private BehaviorStatus RangedEngageTick(BehaviorContext ctx)
+    {
+        _rangedEngagedThisTick = true;
+        return _coord.RangedEngageTick(ctx, DeliriumTargetSkipped);
+    }
+
+    private bool ShouldEngageRanged(BehaviorContext ctx)
+        => ctx.Settings.MapClearStance == 2
+           && (_coord.RangedRepositionActive
+               || _coord.SelectRangedTarget(ctx, DeliriumTargetSkipped) is not null);
+
+    private bool ShouldEngageFlicker(BehaviorContext ctx)
+        => _coord.SelectFlickerTarget(ctx) is not null;
+
+    private BehaviorStatus FlickerEngageTick(BehaviorContext ctx)
+        => _coord.FlickerEngageTick(ctx);
 
     private bool ShouldEngagePack(BehaviorContext ctx)
     {
@@ -554,8 +628,9 @@ public sealed class PushCombatMode : IBotMode
     /// arrived" while the clicker refused the label (terrain-LOS-blocked), satisfying the
     /// tree with a no-op every tick for a full zone-failsafe window (live 2026-07-15).
     /// A target the clicker keeps refusing is struck out after <see cref="LootStrikeOutSeconds"/>
-    /// and blacklisted so the sweep stops selecting it; the remembered-loot drain then owns
-    /// it and its own abandonment path retires it.
+    /// and blacklisted so the sweep stops selecting it. End-of-map completion uses that same
+    /// actionable-label contract, so an unreachable drop never triggers a backtracking pass or
+    /// holds a completed map open until the WorldItem despawns.
     /// </summary>
     private BehaviorStatus LootSweepTick(BehaviorContext ctx)
     {
@@ -607,6 +682,20 @@ public sealed class PushCombatMode : IBotMode
     /// the debounce absorbs the single-tick flickers around goal handoffs.</summary>
     private bool ZoneFinished(BehaviorContext ctx)
     {
+        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
+        var canComplete = MapZoneCompletionPolicy.CanCompleteMap(
+            ExplorationDone(ctx), bossRequired, BossComplete(ctx), _delirium.IsSettled,
+            BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName));
+        if (MapZoneCompletionPolicy.ShouldCompleteImmediately(
+                canComplete,
+                BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+                _bossArenaEntered))
+        {
+            _exhaustedSince = null;
+            return true;
+        }
+
         if (!MapZoneCompletionPolicy.CanAdvanceToAnotherZone(TraversalDone(ctx)))
         {
             _exhaustedSince = null;
@@ -618,14 +707,26 @@ public sealed class PushCombatMode : IBotMode
 
     private bool ObjectivesComplete(BehaviorContext ctx)
         => TraversalDone(ctx)
-        && (ctx.Strategy?.Completion.RequireBossKill != true || _bossTracker.IsComplete);
+        && (ctx.Strategy?.Completion.RequireBossKill != true || BossComplete(ctx));
 
     private bool TraversalDone(BehaviorContext ctx)
     {
-        if (ExplorationDone(ctx)) return true;
         var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
-        return ctx.Strategy?.Completion.RequireBossKill == true
-            && _bossTracker.IsComplete
+        var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
+        if (ExplorationDone(ctx))
+        {
+            if (MapZoneCompletionPolicy.ShouldContinueBossDiscovery(
+                    bossRequired,
+                    BossComplete(ctx),
+                    BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+                    _bossArenaEntered,
+                    _exploration.IsExhausted,
+                    FindEligibleTransition(ctx) is not null))
+                return false;
+            return true;
+        }
+        return bossRequired
+            && BossComplete(ctx)
             && BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName);
     }
 
@@ -651,7 +752,12 @@ public sealed class PushCombatMode : IBotMode
     /// </summary>
     private bool TransitionEligible(EntityCache.Entry e)
     {
-        if (e.Kind != EntityListReader.EntityKind.AreaTransition) return false;
+        if (!MapTransitionPolicy.IsTraversalCandidate(e)) return false;
+        if (_bossCheckpointRecoveryPending
+            && _bossCheckpointGoal is { } checkpointDoor
+            && Math.Abs(checkpointDoor.X - e.GridPosition.X)
+               + Math.Abs(checkpointDoor.Y - e.GridPosition.Y) < 20)
+            return true;
         // A same-hash boss arena's nearby exit must never fall through to the generic
         // zone-finished transition branch while the required roster is incomplete.
         // Only the dedicated completed-arena branch may leave this sub-area.
@@ -671,12 +777,101 @@ public sealed class PushCombatMode : IBotMode
     // filter instead. Portals remain excluded and already-used same-hash doors remain blocked.
     private bool CompletedBossArenaExitTransitionEligible(EntityCache.Entry e)
     {
-        if (e.Kind != EntityListReader.EntityKind.AreaTransition) return false;
+        if (!MapTransitionPolicy.IsTraversalCandidate(e)) return false;
         foreach (var (area, pos) in _usedTransitions)
             if (area == _currentArea
                 && Math.Abs(pos.X - e.GridPosition.X) + Math.Abs(pos.Y - e.GridPosition.Y) < 20)
                 return false;
         return true;
+    }
+
+    private bool ShouldPlaceBossCheckpointPortal(BehaviorContext ctx)
+    {
+        if (!_orchestrated || _bossCheckpointPortal.IsReady || _bossCheckpointPortal.IsFailed)
+            return false;
+        if (ctx.Strategy?.Completion.RequireBossKill != true
+            || BossComplete(ctx)
+            || _bossArenaEntered
+            || ctx.Live is not { } live)
+            return false;
+
+        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
+        if (!BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+            return false;
+
+        if (_bossCheckpointGoal is null)
+        {
+            var transition = FindEligibleTransition(ctx);
+            if (transition is null) return false;
+            _bossCheckpointGoal = transition.GridPosition;
+        }
+
+        // Never trade safety for checkpoint efficiency. Ordinary combat gets control until
+        // the staging pocket is quiet, then the portal branch resumes from its latched door.
+        if (HasLivingHostileWithin(ctx, BossCheckpointSafetyRadiusGrid))
+            return false;
+
+        return true;
+    }
+
+    private BehaviorStatus BossCheckpointPortalTick(BehaviorContext ctx)
+    {
+        if (_bossCheckpointGoal is null || ctx.Live is not { } live)
+            return BehaviorStatus.Failure;
+
+        if (Distance(live.GridPosition, _bossCheckpointGoal.Value)
+            > BossCheckpointStagingDistanceGrid)
+            return _bossCheckpointApproach.Tick(ctx);
+
+        return _bossCheckpointPortal.Tick(ctx);
+    }
+
+    private static bool HasLivingHostileWithin(BehaviorContext ctx, float range)
+    {
+        if (ctx.Entities is null || ctx.Live is not { } live) return false;
+        var r2 = range * range;
+        foreach (var entry in ctx.Entities.Entries.Values)
+        {
+            if (entry.IsStale
+                || entry.Kind != EntityListReader.EntityKind.Monster
+                || entry.Disposition != EntityDisposition.Combatant
+                || entry.AlliedReaction.Truth == ObservationTruth.True
+                || entry.Dormancy.Truth == ObservationTruth.True)
+                continue;
+            // This is a positive living-hostile gate. An unreadable life component is not
+            // evidence that an actor is alive; synthetic/dehydrating boss actors commonly
+            // lose that component after death and otherwise block completion forever.
+            if (entry.LifeReadable.Truth != ObservationTruth.True
+                || entry.HpCurrent <= 0
+                || entry.HpMax <= 1)
+                continue;
+            if (DistanceSquared(entry.GridPosition, live.GridPosition) <= r2)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A raw boss disappearance is only a candidate completion. Phased encounters can remove
+    /// the boss entity between waves, and the entity scanner correctly reports the same shape
+    /// as death for that short interval. Require a quiet local arena after the death evidence;
+    /// any living boss or add immediately revokes the candidate. This also gives delayed phase
+    /// spawns time to appear before terminal-map completion can leave through a portal.
+    /// </summary>
+    private bool BossComplete(BehaviorContext ctx)
+    {
+        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        if (!_bossTracker.IsComplete
+            || HasFreshLivingRequiredBossEntity(ctx, mapName)
+            || HasLivingHostileWithin(ctx, 300f))
+        {
+            _bossClearCandidateSince = null;
+            return false;
+        }
+
+        _bossClearCandidateSince ??= BotMonotonicClock.Now;
+        return (BotMonotonicClock.Now - _bossClearCandidateSince.Value).TotalSeconds
+            >= BossClearSettleSeconds;
     }
 
     private bool ShouldEnterRequiredBossArena(BehaviorContext ctx)
@@ -686,26 +881,38 @@ public sealed class PushCombatMode : IBotMode
         // Nearby positive boss identity means we are already inside the arena. The distance
         // gate matters for same-hash arenas: parent-zone scans can retain a remote boss corpse,
         // which must not reconstruct the arena latch after we have exited.
-        if (BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName)
-            && HasFreshRequiredBossEntity(ctx, mapName))
+        if (HasFreshLivingRequiredBossEntity(ctx, mapName))
         {
             _bossArenaEntered = true;
+            if (_bossArenaEntryGrid.X == 0 && _bossArenaEntryGrid.Y == 0
+                && ctx.Live is { } live)
+                _bossArenaEntryGrid = live.GridPosition;
             return false;
         }
-        if (_bossTracker.IsComplete) return false;
+        if (BossComplete(ctx)) return false;
         if (_bossArenaEntered) return false;
-        if (!BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+        var hasSeparateArena = BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+        var hasTerminalEndpoint = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName);
+        if (!hasSeparateArena && !hasTerminalEndpoint)
+            return false;
+        if (hasSeparateArena
+            && _orchestrated
+            && !_bossCheckpointPortal.IsReady
+            && !_bossCheckpointPortal.IsFailed)
             return false;
         // Once the entry behavior owns a door, keep that exact parent-zone coordinate
         // latched through same-hash teleport confirmation. Re-resolving here after the
         // displacement would select the nearby arena exit and incorrectly mark it used.
         if (_transitGoal is not null) return true;
         var transition = FindEligibleTransition(ctx);
-        if (transition is null) return false;
+        var arenaLabel = FindVisibleArenaLabel(ctx);
+        if (transition is null && arenaLabel is null) return false;
         // EnterAreaTransition accepts stale transition coordinates as navigation anchors and
         // requires a fresh ground label only for the click. Once the known boss door has been
         // observed, it beats every remaining coverage frontier regardless of current distance.
-        _transitGoal = transition.GridPosition;
+        _transitGoal = transition?.GridPosition
+            ?? arenaLabel!.EntityGridPosition
+            ?? ctx.Live?.GridPosition;
         return true;
     }
 
@@ -732,7 +939,7 @@ public sealed class PushCombatMode : IBotMode
             && fragments.Any(fragment => entry.Path.Contains(
                 fragment, StringComparison.OrdinalIgnoreCase))
             && entry.LifeReadable.Truth == ObservationTruth.True
-            && entry.HpMax > 0
+            && entry.HpMax > 1
             && entry.HpCurrent > 0);
     }
 
@@ -745,12 +952,32 @@ public sealed class PushCombatMode : IBotMode
     private bool BossHuntActive(BehaviorContext ctx)
     {
         var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var connectedTerminal =
+            BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
+            && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+        // Guardian layouts are linear rush maps. Their physical endpoint is the primary
+        // traversal objective from spawn; combat/loot above the route still gets first
+        // refusal. Do not gate this on reveal percentage: network-bubble coverage and
+        // process recovery can both say nothing useful about whether the endpoint was reached.
+        if (connectedTerminal
+            && ctx.Strategy?.Completion.RequireBossKill == true
+            && !BossComplete(ctx)
+            && !_bossArenaEntered)
+            return true;
+
         var (revealed, total) = _exploration.Progress(ctx);
         var revealPercent = total > 0 ? 100.0 * revealed / total : 0;
+        // Some terminal boss rooms (the Shaper Guardians) are connected terrain rather
+        // than a real AreaTransition. They still need the same late-map landmark priority:
+        // after a death/restart, ordinary coverage can exhaust far from the already-revealed
+        // arena and otherwise leave the required boss permanently undiscovered.
+        var hasDedicatedBossDestination =
+            BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName)
+            || BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName);
         return MapZoneCompletionPolicy.ShouldPrioritizeBossArena(
             ctx.Strategy?.Completion.RequireBossKill == true,
-            _bossTracker.IsComplete,
-            BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
+            BossComplete(ctx),
+            hasDedicatedBossDestination,
             _bossArenaEntered,
            revealPercent);
     }
@@ -758,16 +985,64 @@ public sealed class PushCombatMode : IBotMode
     private bool ShouldSeekRequiredBossArena(BehaviorContext ctx)
     {
         _bossArenaSearchGoal = null;
-        if (!BossHuntActive(ctx) || ctx.Live is not { } live) return false;
-        if (FindEligibleTransition(ctx) is not null) return false;
+        if (!BossHuntActive(ctx) || ctx.Live is not { } live)
+            return false;
+        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        var connectedTerminal = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
+            && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName);
+        if (_bossArenaLandmarkRejected && !connectedTerminal) return false;
+        // A real separate arena is owned by the verified transition branch. Connected
+        // Guardian maps also contain ordinary corridor transitions, but those must not
+        // suppress their terminal boss-landmark route.
+        if (BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName)
+            && FindEligibleTransition(ctx) is not null)
+            return false;
         _bossArenaSearchGoal = ctx.Snapshot.TileMap.FindNearestLandmark(
             LandmarkCatalog.Kind.BossArena, live.GridPosition);
+        if (_bossArenaSearchGoal is null && connectedTerminal)
+            _bossArenaSearchGoal = _exploration.FarthestConnectedPoint(ctx, _arrivalGrid);
         return _bossArenaSearchGoal is not null;
     }
+
+    private static GroundLabelView? FindVisibleArenaLabel(BehaviorContext ctx)
+        => ctx.Snapshot.GroundLabels
+            .Where(label => label.IsRectOnScreen && IsArenaLabel(label))
+            .OrderBy(label => label.DistanceToPlayer)
+            .FirstOrDefault();
+
+    internal static bool IsArenaLabel(GroundLabelView label)
+        => IsArenaLabelText(label.DisplayName)
+        || IsArenaLabelText(label.RenderName)
+        || label.Path.Contains("Arena", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsArenaLabelText(string text)
+        => text.Trim().Equals("Arena", StringComparison.OrdinalIgnoreCase);
 
     private BehaviorStatus BossArenaSearchTick(BehaviorContext ctx)
     {
         var status = _bossArenaSearch.Tick(ctx);
+        if (status == BehaviorStatus.Success)
+        {
+            var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+            if (BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(mapName)
+                && !BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+            {
+                // Connected Guardian arenas have no transition to click. Reaching their
+                // landmark is the desired result; hold this branch until proximity streams
+                // or activates the exact boss entity, which then preempts us above.
+                return BehaviorStatus.Running;
+            }
+            if (FindEligibleTransition(ctx) is not null)
+                return status;
+            _bossArenaLandmarkRejected = true;
+            Diagnostics.EventLog.Emit(
+                "maploop", "maploop.boss-arena-landmark-empty",
+                Diagnostics.EventSeverity.Warning,
+                $"boss-arena landmark {_bossArenaSearchGoal} reached without a valid door; resuming connected coverage");
+            _bossArenaSearchGoal = null;
+            _bossArenaSearch.Reset();
+            return BehaviorStatus.Failure;
+        }
         if (status == BehaviorStatus.Failure)
         {
             Diagnostics.EventLog.Emit(
@@ -786,6 +1061,8 @@ public sealed class PushCombatMode : IBotMode
         MarkTransitionUsed(_transitGoal);
         _transition.Reset();
         _bossArenaEntered = true;
+        _bossCheckpointRecoveryPending = false;
+        _bossArenaLandmarkRejected = false;
         if (ctx.Live is { } live)
         {
             _arrivalGrid = live.GridPosition;
@@ -807,7 +1084,7 @@ public sealed class PushCombatMode : IBotMode
         var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
         if (!MapZoneCompletionPolicy.ShouldExitCompletedBossArena(
                 ctx.Strategy?.Completion.RequireBossKill == true,
-                _bossTracker.IsComplete,
+                BossComplete(ctx),
                 BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName),
                 _bossArenaEntered))
             return false;
@@ -850,24 +1127,32 @@ public sealed class PushCombatMode : IBotMode
     {
         _visibleBossGoal = null;
         if (ctx.Strategy?.Completion.RequireBossKill != true
-            || _bossTracker.IsComplete
+            || BossComplete(ctx)
             || ctx.Entities is null
             || ctx.Live is not { } live)
             return false;
 
-        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(
-            ctx.Strategy.Supply.Map.TargetMapName);
+        var mapName = ctx.Strategy.Supply.Map.TargetMapName;
+        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
         if (fragments.Count == 0) return false;
+        var chimera = mapName.Contains("Chimera", StringComparison.OrdinalIgnoreCase);
 
         EntityCache.Entry? closest = null;
         var closestD2 = float.PositiveInfinity;
         foreach (var entry in ctx.Entities.Entries.Values)
         {
-            if (entry.IsStale || entry.Kind != EntityListReader.EntityKind.Monster) continue;
             if (!fragments.Any(fragment => entry.Path.Contains(
                     fragment, StringComparison.OrdinalIgnoreCase))) continue;
-            if (entry.LifeReadable.Truth == ObservationTruth.True
-                && (entry.HpMax <= 0 || entry.HpCurrent <= 0)) continue;
+            // Chimera's dormant marker is not his location during smoke and must never
+            // preempt active adds/cloud search. Other Guardians (live Phoenix) can initially
+            // stream as dormant and require proximity before becoming combat-eligible, so
+            // their positively identified living actor is a valid approach target.
+            var dormantLivingGuardian = !chimera
+                && !entry.IsStale
+                && entry.LifeReadable.Truth == ObservationTruth.True
+                && entry.HpCurrent > 0
+                && entry.Dormancy.Truth == ObservationTruth.True;
+            if (!TargetEligibility.IsEligible(entry) && !dormantLivingGuardian) continue;
 
             var dx = entry.GridPosition.X - live.GridPosition.X;
             var dy = entry.GridPosition.Y - live.GridPosition.Y;
@@ -885,15 +1170,146 @@ public sealed class PushCombatMode : IBotMode
         return true;
     }
 
+    private bool ShouldRevealDormantChimera(BehaviorContext ctx)
+    {
+        var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? "";
+        if (!mapName.Contains("Chimera", StringComparison.OrdinalIgnoreCase)
+            || !_bossArenaEntered
+            || BossComplete(ctx)
+            || ctx.Entities is null)
+        {
+            ResetChimeraReveal();
+            return false;
+        }
+
+        // A targetable boss or add owns Flicker/combat above this branch. The smoke search is
+        // only the otherwise-idle gap between Chimera's add phase and his reappearance.
+        if (ctx.Entities.Entries.Values.Any(entry => TargetEligibility.IsEligible(entry)))
+        {
+            ResetChimeraReveal();
+            return false;
+        }
+
+        var fragments = BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName);
+        var dormant = ctx.Entities.Entries.Values.FirstOrDefault(entry =>
+            !entry.IsStale
+            && entry.LifeReadable.Truth == ObservationTruth.True
+            && entry.HpCurrent > 0
+            && entry.Dormancy.Truth == ObservationTruth.True
+            && fragments.Any(fragment => entry.Path.Contains(
+                fragment, StringComparison.OrdinalIgnoreCase)));
+        if (dormant is null)
+        {
+            ResetChimeraReveal();
+            return false;
+        }
+
+        // Smoke patches hydrate as paired client/server ground-effect entities. Prefer their
+        // exact coordinates over the dormant boss marker: live capture proved the latter sits
+        // on ArenaMiddle and is only a generic marker while Chimera is hidden.
+        if (_chimeraRevealGoal is null && ctx.Live is { } live)
+        {
+            var cloud = ctx.Entities.Entries.Values
+                .Where(entry => !entry.IsStale
+                    && entry.Path.Contains(
+                        "ground_effects/FillGroundEffect", StringComparison.OrdinalIgnoreCase)
+                    && !_chimeraCloudsVisited.Any(visited =>
+                        Distance(visited, entry.GridPosition) < 8f))
+                .OrderBy(entry => Distance(live.GridPosition, entry.GridPosition))
+                .FirstOrDefault();
+            if (cloud is not null)
+            {
+                _chimeraRevealGoal = cloud.GridPosition;
+                _chimeraRevealGoalIsCloud = true;
+            }
+        }
+
+        if (_chimeraRevealGoal is null)
+        {
+            _chimeraRevealAnchor ??= ctx.Entities.Entries.Values
+                .FirstOrDefault(entry => !entry.IsStale
+                    && entry.Path.Contains("ArenaMiddle", StringComparison.OrdinalIgnoreCase))
+                ?.GridPosition ?? dormant.GridPosition;
+            _chimeraRevealGoal = ChimeraRevealGoal(
+                _chimeraRevealAnchor.Value, _chimeraRevealAttempt);
+            _chimeraRevealGoalIsCloud = false;
+        }
+        return true;
+    }
+
+    private BehaviorStatus ChimeraRevealTick(BehaviorContext ctx)
+    {
+        var status = _chimeraRevealApproach.Tick(ctx);
+        if (status == BehaviorStatus.Running) return status;
+
+        var completedGoal = _chimeraRevealGoal;
+        Diagnostics.EventLog.Emit(
+            "maploop", "maploop.chimera-smoke-search",
+            status == BehaviorStatus.Success
+                ? Diagnostics.EventSeverity.Info
+                : Diagnostics.EventSeverity.Warning,
+            $"Chimera smoke search point {_chimeraRevealAttempt + 1} " +
+            $"{(status == BehaviorStatus.Success ? "crossed" : "unreachable")} at " +
+            $"({completedGoal?.X},{completedGoal?.Y})" +
+            (_chimeraRevealGoalIsCloud ? " [ground-effect cloud]" : " [arena circuit]"));
+        if (_chimeraRevealGoalIsCloud && completedGoal is { } cloud)
+            _chimeraCloudsVisited.Add(cloud);
+        else
+            _chimeraRevealAttempt = (_chimeraRevealAttempt + 1) % 17;
+        _chimeraRevealGoal = null;
+        _chimeraRevealGoalIsCloud = false;
+        _chimeraRevealApproach.Reset();
+        // Keep exclusive control until an active enemy appears; returning Success here lets
+        // generic exhausted-map traversal briefly pull away from the smoke clouds.
+        return BehaviorStatus.Running;
+    }
+
+    private void ResetChimeraReveal()
+    {
+        if (_chimeraRevealAnchor is null && _chimeraRevealGoal is null
+            && _chimeraCloudsVisited.Count == 0) return;
+        _chimeraRevealAnchor = null;
+        _chimeraRevealGoal = null;
+        _chimeraRevealAttempt = 0;
+        _chimeraRevealGoalIsCloud = false;
+        _chimeraCloudsVisited.Clear();
+        _chimeraRevealApproach.Reset();
+    }
+
+    internal static Vector2i ChimeraRevealGoal(Vector2i anchor, int attempt)
+    {
+        if (attempt <= 0) return anchor;
+        var index = (attempt - 1) % 8;
+        var ring = (attempt - 1) / 8;
+        var radius = 75 + ring * 55;
+        (double X, double Y)[] directions =
+        [
+            (1, 0), (Math.Sqrt(0.5), Math.Sqrt(0.5)), (0, 1),
+            (-Math.Sqrt(0.5), Math.Sqrt(0.5)), (-1, 0),
+            (-Math.Sqrt(0.5), -Math.Sqrt(0.5)), (0, -1),
+            (Math.Sqrt(0.5), -Math.Sqrt(0.5)),
+        ];
+        var direction = directions[index];
+        return new Vector2i
+        {
+            X = anchor.X + (int)Math.Round(direction.X * radius),
+            Y = anchor.Y + (int)Math.Round(direction.Y * radius),
+        };
+    }
+
     private BehaviorStatus VisibleBossApproachTick(BehaviorContext ctx)
     {
         var status = _visibleBossApproach.Tick(ctx);
         if (status == BehaviorStatus.Failure)
         {
-            Diagnostics.EventLog.Emit(
-                "maploop", "maploop.visible-boss-unreachable",
-                Diagnostics.EventSeverity.Warning,
-                $"could not route to visible required boss at {_visibleBossGoal}");
+            if (BotMonotonicClock.ElapsedSince(_lastVisibleBossUnreachableAt).TotalSeconds >= 5)
+            {
+                Diagnostics.EventLog.Emit(
+                    "maploop", "maploop.visible-boss-unreachable",
+                    Diagnostics.EventSeverity.Warning,
+                    $"could not route to visible required boss at {_visibleBossGoal}");
+                _lastVisibleBossUnreachableAt = BotMonotonicClock.Now;
+            }
             _visibleBossGoal = null;
         }
         return status;
@@ -903,12 +1319,17 @@ public sealed class PushCombatMode : IBotMode
     {
         if (ctx.Strategy?.Completion.RequireBossKill != true
             || !_bossArenaEntered
-            || _bossTracker.IsComplete
+            || BossComplete(ctx)
             || _bossArenaInwardAttempt >= 8
             || ctx.Live is null)
             return false;
 
         var mapName = ctx.Strategy.Supply.Map.TargetMapName;
+        var expectedBosses = BubblesBot.Core.Knowledge.MapBossCatalog
+            .BossFragments(mapName).Count;
+        if (!MapZoneCompletionPolicy.ShouldSearchArenaForMissingBoss(
+                BossComplete(ctx), _bossTracker.BossesDead, expectedBosses))
+            return false;
         // A visible living boss gets the approach/combat branch above. A corpse from only
         // part of a multi-boss roster does not: continue staging until the missing boss
         // streams in, so a hot restart cannot leave through the arena exit prematurely.
@@ -940,7 +1361,7 @@ public sealed class PushCombatMode : IBotMode
         _bossArenaInwardGoal = null;
         _bossArenaInward.Reset();
         if (MapZoneCompletionPolicy.ShouldAbandonExhaustedArenaSearch(
-                _bossArenaInwardAttempt, 8, _bossTracker.IsComplete))
+                _bossArenaInwardAttempt, 8, BossComplete(ctx)))
         {
             _requestedAbandonReason =
                 $"boss arena search exhausted after {_bossArenaInwardAttempt} routes with " +
@@ -1078,14 +1499,11 @@ public sealed class PushCombatMode : IBotMode
 
     private BehaviorStatus NextZoneTick(BehaviorContext ctx)
     {
-        if (_lootMemory.Count > 0 && !_delirium.SuppressBacktracking)
-            return DrainRememberedLootTick(ctx);
-
         var bossRequired = ctx.Strategy?.Completion.RequireBossKill == true;
         var bossCompletesTraversal = BubblesBot.Core.Knowledge.MapBossCatalog.BossCompletesTraversal(
             ctx.Strategy?.Supply.Map.TargetMapName ?? "");
         if (MapZoneCompletionPolicy.CanCompleteMap(
-                ExplorationDone(ctx), bossRequired, _bossTracker.IsComplete, _delirium.IsSettled,
+                ExplorationDone(ctx), bossRequired, BossComplete(ctx), _delirium.IsSettled,
                 bossCompletesTraversal))
         {
             IsCleared = true;
@@ -1102,20 +1520,81 @@ public sealed class PushCombatMode : IBotMode
 
         var target = FindEligibleTransition(ctx);
         _transitGoal = target?.GridPosition;
-        if (target is not null) return _transition.Tick(ctx);
+        if (target is not null)
+        {
+            var mapName = ctx.Strategy?.Supply.Map.TargetMapName ?? string.Empty;
+            // If checkpoint placement did not claim the final door, the exhausted-zone
+            // fallback can still be the route into a known separate boss arena. Preserve
+            // the same-hash displacement evidence and enable inward staging instead of
+            // treating it as an ordinary zone hop.
+            if (bossRequired && !BossComplete(ctx)
+                && BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(mapName))
+                return BossArenaTransitionTick(ctx);
+            return _transition.Tick(ctx);
+        }
 
         if (!MapZoneCompletionPolicy.CanCompleteMap(
-                ExplorationDone(ctx), bossRequired, _bossTracker.IsComplete, _delirium.IsSettled,
+                ExplorationDone(ctx), bossRequired, BossComplete(ctx), _delirium.IsSettled,
                 bossCompletesTraversal))
         {
             _movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
-            LastDecision = bossRequired && !_bossTracker.IsComplete
+            LastDecision = bossRequired && !BossComplete(ctx)
                 ? "zone exhausted; waiting for required boss transition/evidence"
                 : "zone exhausted; waiting for Delirium settlement";
             return BehaviorStatus.Running;
         }
 
         return BehaviorStatus.Running;
+    }
+
+    /// <summary>
+    /// Drops transient corpse/combat/door state after checkpoint resurrection while preserving
+    /// the current map's exploration, boss evidence, Delirium lifecycle, and loot ledger.
+    /// Returns false unless this map positively confirmed its pre-boss portal.
+    /// </summary>
+    public bool PrepareForBossCheckpointRecovery()
+    {
+        if (!_bossCheckpointPortal.IsReady || _bossCheckpointGoal is null || IsCleared)
+            return false;
+
+        _movement.Release();
+        _coord.ResetCombat();
+        _interact.Cancel();
+        _transition.Reset();
+        _completedBossArenaExit.Reset();
+        _bossCheckpointApproach.Reset();
+        _bossArenaInward.Reset();
+        _visibleBossApproach.Reset();
+        _lootApproach.Reset();
+        _bossArenaEntered = false;
+        _bossCheckpointRecoveryPending = true;
+        _transitGoal = null;
+        _bossArenaInwardGoal = null;
+        _bossArenaInwardAttempt = 0;
+        _visibleBossGoal = null;
+        _lastVisibleBossUnreachableAt = TimeSpan.MinValue;
+        _chimeraRevealAnchor = null;
+        _chimeraRevealGoal = null;
+        _chimeraRevealAttempt = 0;
+        _chimeraRevealGoalIsCloud = false;
+        _chimeraCloudsVisited.Clear();
+        _chimeraRevealApproach.Reset();
+        _exhaustedSince = null;
+        _root.Reset();
+        LastDecision = "death recovery: returning to pre-boss checkpoint";
+        return true;
+    }
+
+    /// <summary>Checkpoint resurrection can return to the entrance of the same map instance.
+    /// Rebuild transient navigation and exploration state so a previously revealed map does
+    /// not remain exhausted at the entrance.</summary>
+    public void PrepareForSameInstanceCheckpointRecovery()
+    {
+        Reset();
+        _exploration.Reset();
+        _currentArea = 0;
+        _usedTransitions.Clear();
+        LastDecision = "death recovery: restarting same-instance map traversal";
     }
 
     public void Reset()
@@ -1130,6 +1609,8 @@ public sealed class PushCombatMode : IBotMode
         _loot.Reset();
         _transition.Reset();
         _completedBossArenaExit.Reset();
+        _bossCheckpointPortal.Reset();
+        _bossCheckpointApproach.Reset();
         _bossArenaSearch.Reset();
         _bossArenaInward.Reset();
         _visibleBossApproach.Reset();
@@ -1173,16 +1654,21 @@ public sealed class PushCombatMode : IBotMode
         _ritualPriority.Reset();
         _bossTracker.Reset();
         _bossConfiguredMap = "";
+        _bossClearCandidateSince = null;
         _deliriumDriveBySkipped.Clear();
         _deliriumPackEnteredAt = TimeSpan.MinValue;
         _deliriumPackAnchor = null;
         _bossArenaEntered = false;
+        _bossCheckpointGoal = null;
+        _bossCheckpointRecoveryPending = false;
         _requestedAbandonReason = null;
         _bossArenaSearchGoal = null;
+        _bossArenaLandmarkRejected = false;
         _bossArenaInwardGoal = null;
         _bossArenaEntryGrid = default;
         _bossArenaInwardAttempt = 0;
         _visibleBossGoal = null;
+        _lastVisibleBossUnreachableAt = TimeSpan.MinValue;
         // _lootMemory intentionally not reset — it's per-area internally, and Reset() fires
         // on every zone hop (same rationale as _exploration).
         _exhaustedSince = null;
@@ -1210,8 +1696,12 @@ public sealed class PushCombatMode : IBotMode
             _currentArea = snapshot.AreaHash;
             IsCleared = false;
             _mapDouses = 0;
-            _arrivalGrid = ctx.Live?.GridPosition ?? default;
+            _arrivalGrid = _persistentTraversalOrigin
+                ?? ctx.Live?.GridPosition
+                ?? default;
+            _persistentTraversalOrigin ??= _arrivalGrid;
             _transitGoal = null;
+            _bossArenaLandmarkRejected = false;
             _exhaustedSince = null;
             _mapCompleteAnnounced = false;
             _areaStartedAt = now0;
@@ -1244,15 +1734,16 @@ public sealed class PushCombatMode : IBotMode
             return;
         }
 
-        // Propagate persistent-cover give-ups (position-keyed) into LootMemory so the
-        // end-of-zone backtrack never walks to a drop we already wrote off as unlootable.
+        // Propagate persistent-cover give-ups (position-keyed) into LootMemory so a bounded
+        // mechanic cleanup never retries a drop we already proved unlootable.
         foreach (var spot in _loot.AbandonedSpots) _lootMemory.AbandonSpot(spot);
-        _lootMemory.Track(ctx);  // remember valuable drops for the end-of-zone sweep
+        _lootMemory.Track(ctx);  // bounded mechanic cleanup only; never a whole-map drain
         UpdateBossEvidence(ctx);
         _delirium.Observe(ctx);
         UpdateStackedDeckObservations(ctx);
         UpdateMechanicEvents(ctx);
         _coord.PreRoot(ctx);           // flasks + RF/douse pulse advance (shared)
+        _rangedEngagedThisTick = false;
         _root.Tick(ctx);
         // Post-root maintenance lives in the coordinator (RF confirm, damage-evidence, held-key
         // release). Map-lifecycle policy stays here: disarm on RF misconfig, abandon on 2x douse.
@@ -1277,7 +1768,7 @@ public sealed class PushCombatMode : IBotMode
             }
         }
 
-        var posture = _coord.Posture(ctx);
+        var posture = _rangedEngagedThisTick ? "ranged" : _coord.Posture(ctx);
         LastDecision = $"{posture} eng={_coord.EngagedId} skip={_coord.BlacklistCount}";
 
         var now2 = BotMonotonicClock.Now;
@@ -1305,13 +1796,67 @@ public sealed class PushCombatMode : IBotMode
             boss = new
             {
                 configured = _bossTracker.HasExpectedBosses,
-                complete = _bossTracker.IsComplete,
+                trackerComplete = _bossTracker.IsComplete,
+                complete = BossComplete(ctx),
+                freshLivingBlocker = HasFreshLivingRequiredBossEntity(
+                    ctx, ctx.Strategy?.Supply.Map.TargetMapName ?? ""),
+                activeLivingBlocker = HasLivingHostileWithin(ctx, 300f),
                 seen = _bossTracker.BossesSeen,
                 dead = _bossTracker.BossesDead,
                 huntActive = BossHuntActive(ctx),
                 arenaEntered = _bossArenaEntered,
+                traversalOrigin = _persistentTraversalOrigin is { } origin
+                    ? new { x = origin.X, y = origin.Y }
+                    : null,
+                endpoint = _bossArenaSearchGoal is { } endpoint
+                    ? new { x = endpoint.X, y = endpoint.Y }
+                    : null,
+                route = new
+                {
+                    decision = _bossArenaSearch.LastDecision,
+                    index = _bossArenaSearch.CurrentPathIndex,
+                    length = _bossArenaSearch.CurrentPath?.Count ?? 0,
+                    goal = _bossArenaSearch.Goal is { } routeGoal
+                        ? new { x = routeGoal.X, y = routeGoal.Y }
+                        : null,
+                },
+                arenaLabel = ctx.Snapshot.GroundLabels
+                    .Where(label => label.IsRectOnScreen)
+                    .Select(label => new
+                    {
+                        display = label.DisplayName,
+                        render = label.RenderName,
+                        path = label.Path,
+                        grid = label.EntityGridPosition is { } labelGrid
+                            ? new { x = labelGrid.X, y = labelGrid.Y }
+                            : null,
+                    })
+                    .FirstOrDefault(label =>
+                        IsArenaLabelText(label.display)
+                        || IsArenaLabelText(label.render)
+                        || label.path.Contains("Arena", StringComparison.OrdinalIgnoreCase)),
+                checkpointPortal = new
+                {
+                    ready = _bossCheckpointPortal.IsReady,
+                    failed = _bossCheckpointPortal.IsFailed,
+                    status = _bossCheckpointPortal.Status,
+                    recoveryPending = _bossCheckpointRecoveryPending,
+                    door = _bossCheckpointGoal is { } checkpoint
+                        ? new { x = checkpoint.X, y = checkpoint.Y }
+                        : null,
+                },
                 freshRequiredEntity = HasFreshRequiredBossEntity(
                     ctx, ctx.Strategy?.Supply.Map.TargetMapName ?? ""),
+                chimeraReveal = _chimeraRevealGoal is { } reveal
+                    ? new
+                    {
+                        attempt = _chimeraRevealAttempt + 1,
+                        x = reveal.X,
+                        y = reveal.Y,
+                        exactCloud = _chimeraRevealGoalIsCloud,
+                        cloudsVisited = _chimeraCloudsVisited.Count,
+                    }
+                    : null,
             },
             delirium = _delirium.Telemetry(ctx),
             mechanics,
@@ -1337,6 +1882,7 @@ public sealed class PushCombatMode : IBotMode
         if (!mapName.Equals(_bossConfiguredMap, StringComparison.OrdinalIgnoreCase))
         {
             _bossConfiguredMap = mapName;
+            _bossClearCandidateSince = null;
             _bossTracker.Configure(BubblesBot.Core.Knowledge.MapBossCatalog.BossFragments(mapName));
         }
         if (!_bossTracker.HasExpectedBosses || ctx.Entities is null || ctx.Live is not { } live)
@@ -1373,7 +1919,7 @@ public sealed class PushCombatMode : IBotMode
         if (RitualCfg(ctx) is not { Shop.Enabled: true } || _ritualShop.IsDone)
             return false;
         if (ctx.Snapshot.RitualWindow.IsVisible) return true;
-        if (!ZoneFinished(ctx) || _lootMemory.Count > 0) return false;
+        if (!ZoneFinished(ctx)) return false;
         if (ctx.Entities is null) return false;
         var rituals = new MechanicsView(ctx.Entities).Entries
             .Where(x => x.Kind == MechanicKind.RitualRune)

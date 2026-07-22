@@ -60,6 +60,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     private readonly OverlayMode _overlay;
     private readonly BlightMode     _blight;
     private readonly SimulacrumRunMode _simulacrum;
+    private readonly GuardianRotaRunMode _guardianRota;
     private readonly MapRunMode _mapRun;
     // One shared combat authority (movement + tactical brain) for general-combat modes.
     private readonly Systems.CombatCoordinator _combat;
@@ -142,6 +143,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         _blight       = new BlightMode(_settings, () => _currentSnapshot, () => _liveCache, () => _entities);
         _combat       = new Systems.CombatCoordinator(new Systems.MovementSystem(_settings));
         _simulacrum   = new SimulacrumRunMode(_settings, _combat, () => _currentSnapshot, () => _liveCache, () => _entities);
+        _guardianRota = new GuardianRotaRunMode(_settings, _combat, () => _currentSnapshot, () => _liveCache, () => _entities);
         _mapRun       = new MapRunMode(_settings, _combat, _strategies, () => _currentSnapshot, () => _liveCache, () => _entities,
             _runReports, () => _lootLedger.Snapshot());
         _profiles = new ProfileStore(_settings);
@@ -187,7 +189,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
     // happens on the tick thread via the existing ShouldAct kill-switch — never call the
     // InputRouter from here.
 
-    private static readonly int[] LegalModes = [0, 4, 5, 6];
+    private static readonly int[] LegalModes = [0, 4, 5, 6, 7];
 
     public Web.ControlResult Arm(int? mode)
     {
@@ -206,6 +208,9 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         if (_settings.Current.ActiveMode == 4 && _strategies.Active is null)
             reasons.Add("Atlas needs a strategy — select one on the Atlas tab first");
         if (reasons.Count > 0) return Web.ControlResult.Blocked("disarmed", reasons.ToArray());
+
+        if (_settings.Current.ActiveMode == 7)
+            _guardianRota.RestartStoppedRun();
 
         _settings.Mutate(s => s.BotActive = true);
         return _enable.ForegroundOk
@@ -283,6 +288,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             4 => (_mapRun.Root,       _mapRun.Name,       _mapRun.LastDecision),
             5 => (_blight.Root,       _blight.Name,       _blight.LastDecision),
             6 => (_simulacrum.Root,   _simulacrum.Name,   _simulacrum.LastDecision),
+            7 => (_guardianRota.Root, _guardianRota.Name, _guardianRota.LastDecision),
             _ => (_overlay.Root,      _overlay.Name,      _overlay.LastDecision),
         };
 
@@ -291,6 +297,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         4 => _mapRun.RunId,
         5 when _lastAreaHash != 0 => $"blight-{_lastAreaHash:X8}",
         6 => _simulacrum.RunId,
+        7 => _guardianRota.RunId,
         _ => null,
     };
 
@@ -416,6 +423,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         {
             5 => new { kind = "blight", state = _blight.PumpTelemetry },
             6 => new { kind = "simulacrum", state = _simulacrum.Telemetry },
+            7 => new { kind = "guardianRota", state = _guardianRota.Telemetry },
             _ => null,
         };
 
@@ -683,6 +691,11 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         Systems.BotMonotonicClock.SetPaused(!_enable.ShouldAct);
         var automationArmed = _settings.Current.BotActive;
         if (_lastAutomationArmed == true && !automationArmed
+            && _settings.Current.ActiveMode == 4)
+        {
+            _mapRun.NotifyDisarmed();
+        }
+        else if (_lastAutomationArmed == true && !automationArmed
             && _settings.Current.ActiveMode == 6)
         {
             // A user pause deliberately gives the current wave a fresh configured budget on
@@ -784,13 +797,20 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
                 {
                     var simulacrumRecovery = _settings.Current.ActiveMode == 6
                         && _simulacrum.NotifyRevived();
-                    if (simulacrumRecovery)
+                    var mapRecovery = _settings.Current.ActiveMode == 4
+                        && _mapRun.NotifyRevived();
+                    var guardianRecovery = _settings.Current.ActiveMode == 7
+                        && _guardianRota.NotifyRevived();
+                    if (simulacrumRecovery || mapRecovery || guardianRecovery)
                     {
                         Diagnostics.EventLog.Log("revive",
-                            $"revived at checkpoint (death #{_revive.Deaths}); Simulacrum recovery retained arm");
+                            $"revived at checkpoint (death #{_revive.Deaths}); "
+                            + $"{(mapRecovery ? "boss-checkpoint map" : guardianRecovery ? "Guardian Rota" : "Simulacrum")} recovery retained arm");
                     }
                     else
                     {
+                        if (_settings.Current.ActiveMode == 4)
+                            _mapRun.NotifyDeath();
                         _settings.Mutate(s => s.BotActive = false);
                         Diagnostics.EventLog.Log("revive",
                             $"revived at checkpoint (death #{_revive.Deaths}); bot stopped");
@@ -806,6 +826,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
                     case 4: _mapRun.Tick(_currentSnapshot, _input); break;
                     case 5: _blight.Tick(_currentSnapshot, _input); break;
                     case 6: _simulacrum.Tick(_currentSnapshot, _input); break;
+                    case 7: _guardianRota.Tick(_currentSnapshot, _input); break;
                     case 0:
                     default:
                         _overlay.Tick(_currentSnapshot, _input);
@@ -842,6 +863,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             4 => _mapRun.HudLines,
             5 => _blight.HudLines,
             6 => _simulacrum.HudLines,
+            7 => _guardianRota.HudLines,
             _ => null,
         };
         var profit = _lootLedger.OverlaySummary();
@@ -947,7 +969,12 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
                 e.SimulacrumGoodbye.IsKnown,
                 e.SimulacrumGoodbye.Value,
                 e.SimulacrumWave.IsKnown,
-                e.SimulacrumWave.Value)).ToArray();
+                e.SimulacrumWave.Value,
+                e.AreaTransitionIdentityReadable,
+                e.AreaTransitionType,
+                e.AreaTransitionAreaId,
+                e.DestinationAreaId,
+                e.DestinationAreaName)).ToArray();
             _flightRecorder.RecordWorldFrame(new Diagnostics.WorldRecordFrame(
                 tickId,
                 Stopwatch.GetTimestamp(),

@@ -102,6 +102,31 @@ public static class DeliriumStates
     }
 }
 
+/// <summary>Live-validated Maven invitation arena activator state indices.</summary>
+public static class MavenInvitationStates
+{
+    public static class BossRushObject
+    {
+        // MavenBossRushObject full lifecycle capture, The Formed 2026-07-21:
+        // 0 before the center podium is clicked; 1 during combat; 3 immediately before
+        // the Maven reward appears, after all four primary guardians are dead.
+        public const int CurrentPhase = 0;
+        public const int Count = 1;
+
+        public const long ReadyToStart = 0;
+        public const long EncounterActive = 1;
+        public const long EncounterComplete = 3;
+
+        public static string Describe(long value) => value switch
+        {
+            ReadyToStart => nameof(ReadyToStart),
+            EncounterActive => nameof(EncounterActive),
+            EncounterComplete => nameof(EncounterComplete),
+            _ => $"Unknown({value})",
+        };
+    }
+}
+
 /// <summary>
 /// Simulacrum monolith (<c>Metadata/MiscellaneousObjects/Afflictionator</c>) state contract.
 /// AutoExile proves the semantic names (<c>active</c>, <c>goodbye</c>, <c>wave</c>), but

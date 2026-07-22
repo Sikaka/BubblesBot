@@ -9,6 +9,7 @@ export type RitualChainOrdering = "nearestFirst" | "cloisterCorpses";
 export type MapSource = "atlasStorage" | "playerInventory" | "stashTab";
 export type MultiAreaPolicy = "exhaustAllZones";
 export type CampaignMode = "none" | "guardianRotation";
+export type MapRollingMode = "none" | "scoured" | "rare" | "rareCorrupted";
 
 export interface MechanicBlockBase {
   type: MechanicType;
@@ -97,7 +98,7 @@ export interface FarmingStrategy {
     scarabs: ScarabLine[];
     currencyReserves: CurrencyReserve[];
   };
-  mapPrep: { atlasNodeName: string; rolling: { mode: "none" } };
+  mapPrep: { atlasNodeName: string; rolling: { mode: MapRollingMode; rejectedStatIds: number[]; maxAttempts: number } };
   mechanics: MechanicBlock[];
   loot: { backtrackMinChaosOverride: number | null; depositAfterEachMap: boolean };
   completion: { requireBossKill: boolean; multiArea: MultiAreaPolicy; targetMaps: number; explorationDonePercent: number };

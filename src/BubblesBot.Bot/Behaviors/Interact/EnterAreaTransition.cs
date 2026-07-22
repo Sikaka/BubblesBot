@@ -29,6 +29,7 @@ public sealed class EnterAreaTransition : IBehavior
     private readonly Func<Core.Snapshot.EntityCache.Entry, bool>? _kindFilter;
     private readonly Func<GameSnapshot?> _liveSnapshot;
     private readonly Func<BehaviorContext, Vector2i?>? _fallbackGrid;
+    private readonly Func<GroundLabelView, bool>? _fallbackLabelFilter;
     private uint _initialAreaHash;
     private Vector2i? _clickOriginGrid;
     private TimeSpan _lastClickAt = TimeSpan.MinValue;
@@ -41,13 +42,15 @@ public sealed class EnterAreaTransition : IBehavior
         SkillBook skills, Func<GameSnapshot?> liveSnapshot,
         Func<Core.Snapshot.EntityCache.Entry, bool>? kindFilter = null,
         Func<BehaviorContext, Vector2i?>? fallbackGrid = null,
-        bool allowGapCrossing = true)
+        bool allowGapCrossing = true,
+        Func<GroundLabelView, bool>? fallbackLabelFilter = null)
     {
         Name = name;
         _interact = interact;
         _liveSnapshot = liveSnapshot;
         _kindFilter = kindFilter;
         _fallbackGrid = fallbackGrid;
+        _fallbackLabelFilter = fallbackLabelFilter;
         _approach = new FollowPath($"{name}/approach", movement,
             ctx => FindTransitionGrid(ctx, _kindFilter) ?? _fallbackGrid?.Invoke(ctx), skills,
             goalArrivalRadius: 8f, allowGapCrossing: allowGapCrossing);
@@ -84,11 +87,11 @@ public sealed class EnterAreaTransition : IBehavior
             && IsConfirmedSameAreaTeleport(origin, displaced.GridPosition, _clickDispatched))
             return LastStatus = BehaviorStatus.Success;
 
-        var label = FindTransitionLabel(ctx, _kindFilter);
+        var label = FindTransitionLabel(ctx, _kindFilter, _fallbackLabelFilter);
         if (label is null)
             return LastStatus = _approach.Tick(ctx);   // can't see it yet — keep walking toward last known grid
 
-        if (!IsInClickRange(ctx, label))
+        if (!IsInClickRange(ctx, label, _fallbackLabelFilter))
             return LastStatus = _approach.Tick(ctx);
 
         if (label.LabelRect is not { } rect)
@@ -169,7 +172,10 @@ public sealed class EnterAreaTransition : IBehavior
         return best?.GridPosition;
     }
 
-    private static GroundLabelView? FindTransitionLabel(BehaviorContext ctx, Func<Core.Snapshot.EntityCache.Entry, bool>? filter)
+    private static GroundLabelView? FindTransitionLabel(
+        BehaviorContext ctx,
+        Func<Core.Snapshot.EntityCache.Entry, bool>? filter,
+        Func<GroundLabelView, bool>? fallbackLabelFilter)
     {
         // Ground labels include AreaTransition entities. We find the nearest one whose
         // backing entity matches the filter.
@@ -191,14 +197,39 @@ public sealed class EnterAreaTransition : IBehavior
                 if (d2 < bestD2) { bestD2 = d2; best = label; }
             }
         }
+        if (best is not null || fallbackLabelFilter is null) return best;
+        foreach (var label in ctx.Snapshot.GroundLabels)
+        {
+            if (!label.IsRectOnScreen || !fallbackLabelFilter(label)) continue;
+            var d2 = label.EntityGridPosition is { } g
+                ? DistanceSquared(g, ctx.Live?.GridPosition ?? default)
+                : 0f;
+            if (d2 < bestD2) { bestD2 = d2; best = label; }
+        }
         return best;
     }
 
-    private static bool IsInClickRange(BehaviorContext ctx, GroundLabelView label)
+    private static bool IsInClickRange(
+        BehaviorContext ctx,
+        GroundLabelView label,
+        Func<GroundLabelView, bool>? fallbackLabelFilter)
     {
-        if (label.EntityGridPosition is not { } g || ctx.Live is null) return false;
+        // Some terminal map doors expose a perfectly valid visible UI label but their
+        // backing entity omits Position. A narrowly accepted fallback label is already
+        // render-range evidence; clicking its on-screen rect is safer than refusing it.
+        if (label.EntityGridPosition is not { } g)
+            return fallbackLabelFilter?.Invoke(label) == true
+                && label.IsRectOnScreen;
+        if (ctx.Live is null) return false;
         var p = ctx.Live.Value.GridPosition;
         return IsWithinReliableClickRange(p, g, ctx.Settings.InteractionRangeGrid);
+    }
+
+    private static float DistanceSquared(Vector2i a, Vector2i b)
+    {
+        var dx = (float)(a.X - b.X);
+        var dy = (float)(a.Y - b.Y);
+        return dx * dx + dy * dy;
     }
 
     internal static bool IsWithinReliableClickRange(

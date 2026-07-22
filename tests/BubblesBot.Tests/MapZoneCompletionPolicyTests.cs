@@ -3,11 +3,32 @@ using BubblesBot.Bot.Behaviors.Interact;
 using BubblesBot.Bot.Behaviors.Movement;
 using BubblesBot.Core.Knowledge;
 using BubblesBot.Core.Game;
+using BubblesBot.Core.Snapshot;
 
 namespace BubblesBot.Tests;
 
 public sealed class MapZoneCompletionPolicyTests
 {
+    [Theory]
+    [InlineData("Arena", true)]
+    [InlineData("ARENA", true)]
+    [InlineData("Grand Arena", false)]
+    [InlineData("Portal", false)]
+    public void TerminalArenaFallbackRequiresExactArenaLabel(string text, bool expected)
+        => Assert.Equal(expected, PushCombatMode.IsArenaLabelText(text));
+
+    [Theory]
+    [InlineData(true, false, true, false, false, false, true)]
+    [InlineData(true, false, true, false, true, false, false)]
+    [InlineData(true, false, true, false, false, true, false)]
+    [InlineData(true, true, true, false, false, false, false)]
+    [InlineData(false, false, true, false, false, false, false)]
+    public void RequiredSeparateArenaContinuesCoverageUntilDoorOrTrueExhaustion(
+        bool required, bool complete, bool separate, bool entered, bool exhausted,
+        bool transitionVisible, bool expected)
+        => Assert.Equal(expected, MapZoneCompletionPolicy.ShouldContinueBossDiscovery(
+            required, complete, separate, entered, exhausted, transitionVisible));
+
     [Fact]
     public void ExhaustedMainZoneCanAdvanceBeforeRequiredBossIsDead()
         => Assert.True(MapZoneCompletionPolicy.CanAdvanceToAnotherZone(explorationDone: true));
@@ -49,6 +70,18 @@ public sealed class MapZoneCompletionPolicyTests
             deliriumSettled: true, bossCompletesTraversal: true));
     }
 
+    [Theory]
+    [InlineData("Forge of the Phoenix", "PhoenixBoss")]
+    [InlineData("Maze of the Minotaur", "MinotaurBoss")]
+    [InlineData("Pit of the Chimera", "ChimeraBoss")]
+    [InlineData("Lair of the Hydra", "HydraBoss")]
+    public void GuardianBossesAreCataloguedAsTerminal(string map, string fragment)
+    {
+        Assert.Contains(MapBossCatalog.BossFragments(map), x => x.Contains(fragment));
+        Assert.True(MapBossCatalog.BossCompletesTraversal(map));
+        Assert.False(MapBossCatalog.HasSeparateBossArena(map));
+    }
+
     [Fact]
     public void CompletedSeparateBossArenaExitsWithoutExploringArena()
     {
@@ -56,6 +89,30 @@ public sealed class MapZoneCompletionPolicyTests
         Assert.False(MapZoneCompletionPolicy.ShouldExitCompletedBossArena(true, false, true, true));
         Assert.False(MapZoneCompletionPolicy.ShouldExitCompletedBossArena(true, true, false, true));
         Assert.False(MapZoneCompletionPolicy.ShouldExitCompletedBossArena(true, true, true, false));
+    }
+
+    [Fact]
+    public void FullyDeadRosterWaitsForBossDeathQuietGate()
+    {
+        Assert.False(MapZoneCompletionPolicy.ShouldSearchArenaForMissingBoss(
+            bossComplete: false, bossesDead: 1, expectedBosses: 1));
+        Assert.True(MapZoneCompletionPolicy.ShouldSearchArenaForMissingBoss(
+            bossComplete: false, bossesDead: 1, expectedBosses: 2));
+        Assert.False(MapZoneCompletionPolicy.ShouldSearchArenaForMissingBoss(
+            bossComplete: true, bossesDead: 1, expectedBosses: 1));
+    }
+
+    [Fact]
+    public void StableObjectivesSkipFrontierDebounceOnlyAfterArenaExit()
+    {
+        Assert.False(MapZoneCompletionPolicy.ShouldCompleteImmediately(
+            canCompleteMap: true, hasSeparateBossArena: true, arenaEntered: true));
+        Assert.True(MapZoneCompletionPolicy.ShouldCompleteImmediately(
+            canCompleteMap: true, hasSeparateBossArena: true, arenaEntered: false));
+        Assert.True(MapZoneCompletionPolicy.ShouldCompleteImmediately(
+            canCompleteMap: true, hasSeparateBossArena: false, arenaEntered: false));
+        Assert.False(MapZoneCompletionPolicy.ShouldCompleteImmediately(
+            canCompleteMap: false, hasSeparateBossArena: false, arenaEntered: false));
     }
 
     [Fact]
@@ -68,6 +125,31 @@ public sealed class MapZoneCompletionPolicyTests
         Assert.True(MapZoneCompletionPolicy.MayUseGenericTransition(
             arenaEntered: false, bossComplete: false));
     }
+
+    [Theory]
+    [InlineData(AreaTransitionType.Normal)]
+    [InlineData(AreaTransitionType.Local)]
+    public void OrdinaryAndLocalDoorsRemainTraversalCandidates(AreaTransitionType type)
+    {
+        var entry = Transition(type, readable: true);
+        Assert.True(MapTransitionPolicy.IsTraversalCandidate(entry));
+        Assert.False(MapTransitionPolicy.IsVaalSideArea(entry));
+    }
+
+    [Theory]
+    [InlineData(AreaTransitionType.NormalToCorrupted)]
+    [InlineData(AreaTransitionType.CorruptedToNormal)]
+    public void VaalSideAreaTransitionsCannotBecomeBossOrNextZoneGoals(AreaTransitionType type)
+    {
+        var entry = Transition(type, readable: true);
+        Assert.False(MapTransitionPolicy.IsTraversalCandidate(entry));
+        Assert.True(MapTransitionPolicy.IsVaalSideArea(entry));
+    }
+
+    [Fact]
+    public void UnreadableTransitionIdentityFailsClosed()
+        => Assert.False(MapTransitionPolicy.IsTraversalCandidate(
+            Transition(AreaTransitionType.Normal, readable: false)));
 
     [Fact]
     public void ExhaustedIncompleteArenaSearchRequestsMapAbandon()
@@ -101,6 +183,20 @@ public sealed class MapZoneCompletionPolicyTests
     }
 
     [Fact]
+    public void ChimeraSmokeSearchCrossesBossThenSweepsTwoRings()
+    {
+        var anchor = new Vector2i { X = 1182, Y = 309 };
+        Assert.Equal(anchor, PushCombatMode.ChimeraRevealGoal(anchor, attempt: 0));
+
+        var inner = PushCombatMode.ChimeraRevealGoal(anchor, attempt: 1);
+        var outer = PushCombatMode.ChimeraRevealGoal(anchor, attempt: 9);
+        Assert.Equal(75, inner.X - anchor.X);
+        Assert.Equal(130, outer.X - anchor.X);
+        Assert.Equal(anchor.Y, inner.Y);
+        Assert.Equal(anchor.Y, outer.Y);
+    }
+
+    [Fact]
     public void BlockedWalkOnlyArenaRouteFailsForGoalRotation()
     {
         Assert.True(FollowPath.ShouldFailWalkOnlyPath(
@@ -131,5 +227,15 @@ public sealed class MapZoneCompletionPolicyTests
         Assert.False(MapZoneCompletionPolicy.ShouldPrioritizeBossArena(true, true, true, false, 90));
         Assert.False(MapZoneCompletionPolicy.ShouldPrioritizeBossArena(true, false, true, true, 90));
     }
+
+    private static EntityCache.Entry Transition(
+        AreaTransitionType type, bool readable) => new()
+    {
+        Kind = EntityListReader.EntityKind.AreaTransition,
+        Path = "Metadata/MiscellaneousObjects/AreaTransition",
+        Metadata = "Metadata/MiscellaneousObjects/AreaTransition",
+        AreaTransitionIdentityReadable = readable,
+        AreaTransitionType = type,
+    };
 
 }

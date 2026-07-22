@@ -17,7 +17,7 @@ public static class UiIndexPaths
 {
     /// <summary>
     /// MapDeviceWindow path from UIRoot. Discovered 2026-05-07 against the
-    /// BawdyLotionMirage test character with the device open. Confidence 1.00 — every
+    /// Test character with the device open. Confidence 1.00 — every
     /// child constraint in <c>UiPatterns.MapDeviceWindow</c> matched exactly; the next
     /// closest candidate scored 0.55, so this is unambiguous. Re-run discovery on each
     /// patch to confirm.

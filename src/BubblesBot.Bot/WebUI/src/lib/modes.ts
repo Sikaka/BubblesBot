@@ -1,4 +1,4 @@
-export type BotModeId = 0 | 4 | 5 | 6;
+export type BotModeId = 0 | 4 | 5 | 6 | 7;
 
 export interface BotModeDefinition {
   id: BotModeId;
@@ -31,6 +31,12 @@ export const BOT_MODES: BotModeDefinition[] = [
     name: "Blight",
     shortDescription: "Blighted maps",
     detail: "Repeat Blighted maps with pump defense, tower, chest, cleanup, and supply policies.",
+  },
+  {
+    id: 7,
+    name: "Guardian Rota",
+    shortDescription: "The Formed rotations",
+    detail: "Detect Maven witness state, roll and run all four Shaper Guardians, then roll and complete The Formed.",
   },
 ];
 

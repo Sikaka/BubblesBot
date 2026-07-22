@@ -19,6 +19,7 @@ public sealed class DeliriumController
 
     private readonly MovementSystem _movement;
     private readonly FollowPath _approach;
+    private readonly Behaviors.Loot.LootClosestVisible _loot;
     private readonly Func<GameSnapshot?> _getSnapshot;
     private Vector2i? _mirrorAnchor;
     private TimeSpan _activatedAt = TimeSpan.MinValue;
@@ -41,9 +42,12 @@ public sealed class DeliriumController
     public Vector2i? MirrorAnchor => _mirrorAnchor;
 
     public DeliriumController(
-        MovementSystem movement, SkillBook skills, Func<GameSnapshot?> getSnapshot)
+        MovementSystem movement, SkillBook skills,
+        Behaviors.Loot.LootClosestVisible loot,
+        Func<GameSnapshot?> getSnapshot)
     {
         _movement = movement;
+        _loot = loot;
         _getSnapshot = getSnapshot;
         _approach = new FollowPath(
             "cross Delirium mirror", movement, _ => _mirrorAnchor, skills,
@@ -304,13 +308,19 @@ public sealed class DeliriumController
         return BehaviorStatus.Running;
     }
 
-    private static int AcceptedLootCount(BehaviorContext ctx)
+    private int AcceptedLootCount(BehaviorContext ctx)
     {
         var filter = Behaviors.Loot.LootClosestVisible.SharedValueFilter;
         return ctx.Snapshot.GroundLabels.Count(label =>
             label.IsItem
             && label.IsLabelVisible
             && label.DistanceToPlayer <= ctx.Settings.LootRangeGrid
+            // Keep the reward barrier in lockstep with PushCombatMode's loot sweep.
+            // A label that the sweep has already proved unclickable/unreachable is no
+            // longer pending work; counting it here held completed maps idle until the
+            // underlying WorldItem finally despawned (live Strand, 2026-07-21).
+            && !_loot.IsBlacklistedLabel(label.LabelAddress)
+            && (label.EntityGridPosition is not { } spot || !_loot.IsSpotAbandoned(spot))
             && (filter is null || filter.Evaluate(label, ctx.Settings.Loot).ShouldTake));
     }
 

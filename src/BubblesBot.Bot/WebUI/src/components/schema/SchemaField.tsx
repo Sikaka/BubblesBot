@@ -6,6 +6,7 @@ import { NumberControl } from "./editors/NumberControl";
 import { TextControl } from "./editors/TextControl";
 import { StringListEditor } from "./editors/StringListEditor";
 import { ModTableEditor } from "./editors/ModTableEditor";
+import { MapModTableEditor } from "./editors/MapModTableEditor";
 import { SkillsEditor } from "./editors/SkillsEditor";
 import { FlasksEditor } from "./editors/FlasksEditor";
 
@@ -42,6 +43,15 @@ export function SchemaFieldControl({ field, value, onChange }: Props) {
         <ModTableEditor
           mods={field.mods ?? []}
           tiers={field.tiers ?? []}
+          value={Array.isArray(value) ? (value as string[]) : []}
+          onChange={onChange}
+        />
+      );
+    case "mapmodtable":
+      return (
+        <MapModTableEditor
+          mods={field.mapMods ?? []}
+          policies={field.policies ?? []}
           value={Array.isArray(value) ? (value as string[]) : []}
           onChange={onChange}
         />

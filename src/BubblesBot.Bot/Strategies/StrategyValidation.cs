@@ -86,6 +86,13 @@ public static class StrategyValidator
             if (reserve.MinCount < 0)
                 result.Error($"supply.currencyReserves[{i}].minCount must be >= 0");
         }
+        if (strategy.Completion.RequireBossKill
+            && BubblesBot.Core.Knowledge.MapBossCatalog.HasSeparateBossArena(
+                supply.Map.TargetMapName)
+            && !supply.CurrencyReserves.Any(reserve =>
+                reserve.Item.Equals("PortalScroll", StringComparison.OrdinalIgnoreCase)
+                && reserve.MinCount >= 2))
+            result.Warn("separate-arena boss checkpointing needs a PortalScroll reserve of at least 2 (checkpoint + successful exit)");
     }
 
     private static void ValidateMapPrep(FarmingStrategy strategy, StrategyValidationResult result)
@@ -101,6 +108,17 @@ public static class StrategyValidator
             result.Warn($"atlas node '{prep.AtlasNodeName}' is not in this build's catalog; the device flow will fail closed rather than select it");
         if (!prep.AtlasNodeName.Trim().Equals(strategy.Supply.Map.TargetMapName.Trim(), StringComparison.OrdinalIgnoreCase))
             result.Warn($"mapPrep.atlasNodeName '{prep.AtlasNodeName}' differs from supply.map.targetMapName '{strategy.Supply.Map.TargetMapName}'");
+        if (prep.Rolling.MaxAttempts is < 1 or > 100)
+            result.Error("mapPrep.rolling.maxAttempts must be 1..100");
+        if (prep.Rolling.RejectedStatIds.Any(id => id <= 0))
+            result.Error("mapPrep.rolling.rejectedStatIds must contain only positive Stats.dat ids");
+        if (prep.Rolling.RejectedStatIds.Count != prep.Rolling.RejectedStatIds.Distinct().Count())
+            result.Error("mapPrep.rolling.rejectedStatIds must not contain duplicates");
+        if (prep.Rolling.Mode == MapRollingMode.Scoured
+            && strategy.Supply.Map.Source != MapSource.PlayerInventory)
+            result.Error("mapPrep.rolling.mode 'scoured' requires playerInventory so Normal rarity can be positively verified");
+        if (prep.Rolling.Mode is MapRollingMode.Rare or MapRollingMode.RareCorrupted)
+            result.Error($"mapPrep.rolling.mode '{prep.Rolling.Mode}' is configured but automatic currency rolling is not executable in this build");
         if (strategy.Completion.RequireBossKill
             && !BubblesBot.Core.Knowledge.MapBossCatalog.HasEntry(strategy.Supply.Map.TargetMapName))
             result.Error($"completion.requireBossKill has no boss roster for map '{strategy.Supply.Map.TargetMapName}'");

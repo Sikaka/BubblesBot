@@ -28,7 +28,8 @@ public sealed class BotSettings
         "Overlay / manual", "0",
         "Map farming",     "4",
         "Blight",          "5",
-        "Simulacrum",      "6")]
+        "Simulacrum",      "6",
+        "Guardian Rota",   "7")]
     public int ActiveMode { get; set; } = 0;
 
     /// <summary>
@@ -38,6 +39,30 @@ public sealed class BotSettings
     /// active strategy survives restarts. Empty means no strategy is selected.
     /// </summary>
     public string ActiveStrategyId { get; set; } = "";
+
+    [Setting("Guardian Rota", "Target rotations",
+        "Complete this many full four-Guardian plus The Formed rotations before disarming.")]
+    [SettingRange(1, 100, 1)]
+    public int GuardianTargetRotations { get; set; } = 3;
+
+    [Setting("Guardian Rota", "Minimum invitation quantity",
+        "The Formed is never activated below this item-quantity value.")]
+    [SettingRange(0, 150, 1)]
+    public int GuardianInvitationMinQuantity { get; set; } = 65;
+
+    [Setting("Guardian Rota", "Preferred invitation quantity",
+        "Reported as the preferred target; the minimum remains the hard activation gate.")]
+    [SettingRange(0, 150, 1)]
+    public int GuardianInvitationPreferredQuantity { get; set; } = 75;
+
+    [Setting("Guardian Rota", "Maximum Chaos rerolls",
+        "Maximum Chaos Orbs spent on one map or invitation before the route stops fail-closed.")]
+    [SettingRange(1, 50, 1)]
+    public int GuardianMaxChaosRerolls { get; set; } = 10;
+
+    [Setting("Guardian Rota", "Dump tab name",
+        "Loot is deposited here after each completed Formed invitation; Guardian maps and rolling currency remain carried.")]
+    public string GuardianDumpTabName { get; set; } = "Dump";
 
     [Setting("Simulacrum", "Minimum delay between waves (s)",
         "Wait at least this long after a wave ends before clicking the monolith again. Loot settling can extend the delay.")]
@@ -250,6 +275,10 @@ public sealed class BotSettings
     [Setting("Flasks", "Auto-use utility flasks", "Also press detected utility flasks on a timer (off by default — enable per your build).")]
     public bool AutoUseUtilityFlasks { get; set; } = false;
 
+    [Setting("Flasks", "Utility flasks only in combat",
+        "When auto-use is enabled, save utility charges until a hostile is inside the combat engage range.")]
+    public bool AutoUtilityOnlyInCombat { get; set; } = true;
+
     [Setting("Flasks", "Auto utility interval (ms)", "Interval between utility flask presses when auto-use is on.")]
     [SettingRange(1000, 15000, 250)]
     public int AutoUtilityIntervalMs { get; set; } = 5000;
@@ -268,8 +297,8 @@ public sealed class BotSettings
         "poe.ninja league for item pricing. Normally auto-read from game memory at startup; this value is only used when that read fails. Requires bot restart to take effect.")]
     public string LeagueName { get; set; } = "Standard";
 
-    [Setting("Loot", "Backtrack min chaos value",
-        "Items worth at least this many chaos are remembered when seen, and the zone loop returns to collect them before taking the next area transition. 0 disables backtracking (only in-path loot is taken).")]
+    [Setting("Loot", "Local off-screen loot min chaos",
+        "During a bounded mechanic cleanup (currently Ritual), remember accepted drops that scroll just outside label range and finish that local circle before continuing. This never causes an end-of-map backtrack. 0 remembers every accepted local drop.")]
     [SettingRange(0, 200, 1)]
     public float LootBacktrackMinChaos { get; set; } = 5f;
 
@@ -285,8 +314,26 @@ public sealed class BotSettings
 
     [Setting("Combat", "Clear stance",
         "How the map-clear loop deals with monsters. Drive-by = walk past and tap an Attack-role skill (needs one bound). Proximity (aura/RF) = path into each pack and STAND among them until they die from your aura / damaging effects (Righteous Fire, heralds, Cast-on-Stun) — no attack skill required.")]
-    [SettingOptions("Drive-by (attack skill)", "0", "Proximity (aura/RF)", "1")]
+    [SettingOptions("Drive-by (attack skill)", "0", "Proximity (aura/RF)", "1", "Ranged standoff", "2")]
     public int MapClearStance { get; set; } = 0;
+
+    [Setting("Combat", "Ranged standoff (grid)",
+        "Ranged stance only: close until the target is inside this distance with clear terrain line-of-fire, then stop and hold the primary attack.")]
+    [SettingRange(10, 90, 5)]
+    public float RangedStandoffGrid { get; set; } = 45f;
+
+    [Setting("Combat", "Use dash while closing",
+        "Ranged stance only: use a ready gap-crossing Dash for long safe approach steps, not only when terrain forces a gap crossing.")]
+    public bool RangedUseDashToClose { get; set; } = true;
+
+    [Setting("Combat", "Ranged kite life (%)",
+        "Ranged stance: immediately reposition when life falls below this percentage. Uses a ready Dash first, otherwise walks away. 0 disables health-pressure kiting.")]
+    [SettingRange(0, 100, 5)]
+    public int RangedKiteHpPercent { get; set; } = 75;
+
+    [Setting("Combat", "Kite rare and unique enemies",
+        "Ranged stance: after a short attack window against a nearby rare/unique, release the attack, dash away from surrounding threats, then resume firing.")]
+    public bool RangedKiteToughTargets { get; set; } = true;
 
     [Setting("Combat", "Required map buff id",
         "Internal player-buff id that must be present before map clearing can act. Empty disables. RF builds use 'righteous_fire'. The bot verifies memory after every area transition and fails closed if the configured key cannot establish it.")]
@@ -337,6 +384,11 @@ public sealed class BotSettings
         "All loot-filter knobs (per-category value thresholds, must-loot lists, quest-item skip). Expand to configure.")]
     [SettingNested]
     public LootSettings Loot { get; set; } = new();
+
+    [Setting("Map modifiers", "Map modifier policy",
+        "Build-specific map safety rules. Reflect and no-regeneration are never-run by default; all other entries are configurable.")]
+    [SettingNested]
+    public MapModifierSettings MapModifiers { get; set; } = new();
 
     // Retained for the non-production research scaffold; intentionally omitted from the
     // generated settings UI until Ultimatum becomes an approved production preset.

@@ -7,7 +7,11 @@ public sealed class StashTabsView
 {
     // Standard migrations can leave an account with hundreds of remove-only tabs.
     // Keep a corruption guard, but do not reject legitimate long-lived accounts.
-    internal const int MaximumTabCount = 1000;
+    // Long-lived Standard accounts can expose thousands of server records because every
+    // remove-only tab from past leagues remains in this catalog even though the UI shows only
+    // a few hundred. Live capture 2026-07-21: 2,023 structurally valid 0x68-byte records while
+    // StashElement reported 238 visible tabs. Keep a corruption guard, but above that reality.
+    internal const int MaximumTabCount = 4096;
 
     public sealed record Tab(string Name, uint Type, int DisplayIndex);
 

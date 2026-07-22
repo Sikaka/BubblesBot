@@ -1,5 +1,6 @@
 using BubblesBot.Bot.Behaviors;
 using BubblesBot.Bot.Behaviors.Movement;
+using BubblesBot.Bot.Behaviors.Combat;
 using BubblesBot.Bot.Input;
 using BubblesBot.Bot.Settings;
 using BubblesBot.Core.Game;
@@ -29,6 +30,7 @@ namespace BubblesBot.Bot.Systems;
 public sealed class CombatCoordinator
 {
     private const int    RetreatStepGrid    = 24;
+    private const double ToughTargetAttackWindowMs = 850;
     private const float  DefaultAttackRange = 55f;
     private const double BlacklistHoldMs    = 15000;
     private const int    RequiredBuffPulseMs = 80;
@@ -44,8 +46,14 @@ public sealed class CombatCoordinator
 
     private readonly DamageEvidenceTracker _damageEvidence = new();
     private readonly FollowPath _engageFollow;
+    private readonly FollowPath _flickerFollow;
+    private readonly FollowPath _rangedFollow;
+    private readonly Reposition _rangedReposition;
+    private readonly MaintainSelfBuffs _selfBuffs;
     private bool _engagePreferDensity;
     private Func<EntityCache.Entry, bool>? _engageAdditionalSkip;
+    private Func<EntityCache.Entry, bool>? _rangedAdditionalSkip;
+    private EntityCache.Entry? _flickerTarget;
 
     // per-tick flags (reset in BeginTick)
     private bool _qHeldThisTick;
@@ -53,6 +61,7 @@ public sealed class CombatCoordinator
     private bool _attackIssuedThisTick;
     private uint _attackIssuedTargetId;
     private double _attackEvidenceDelayMs = 1200;
+    private TimeSpan _rangedToughExposureAt = TimeSpan.MinValue;
 
     // RF re-light pulse state
     private TimeSpan _requiredBuffLastCastAt = TimeSpan.Zero;
@@ -76,10 +85,27 @@ public sealed class CombatCoordinator
             ctx => SelectProximityTarget(ctx, _engagePreferDensity, _engageAdditionalSkip)?.GridPosition,
             Skills,
             goalArrivalRadiusProvider: ctx => ctx.Settings.ProximityHoldRadiusGrid);
+        _flickerFollow = new FollowPath("flicker engage", Movement,
+            _ => _flickerTarget?.GridPosition,
+            Skills,
+            goalArrivalRadiusProvider: AttackRange,
+            preferDashForLongTravel: true);
+        _rangedFollow = new FollowPath("ranged engage", Movement,
+            ctx => SelectRangedTarget(ctx, _rangedAdditionalSkip)?.GridPosition,
+            Skills,
+            goalArrivalRadiusProvider: ctx => Math.Min(
+                Math.Max(10f, ctx.Settings.RangedStandoffGrid), AttackRange(ctx)),
+            preferDashForLongTravel: true);
+        _rangedReposition = new Reposition(
+            "ranged kite", Movement, Skills,
+            ctx => RetreatPoint(ctx, allowGapCrossing: true,
+                Math.Max(35f, ctx.Settings.RangedStandoffGrid)));
+        _selfBuffs = new MaintainSelfBuffs("combat self buffs", Combat, Skills);
     }
 
     // ── telemetry passthrough ───────────────────────────────────────────────
     public uint EngagedId => _damageEvidence.EngagedId;
+    public bool RangedRepositionActive => _rangedReposition.IsActive;
     public int  BlacklistCount => _damageEvidence.BlacklistCount;
     public double EngagedForMs(TimeSpan now) => _damageEvidence.EngagedForMs(now);
     public IEnumerable<(uint Id, double RemainingMs)> Blacklist(TimeSpan now) => _damageEvidence.Blacklist(now);
@@ -104,6 +130,7 @@ public sealed class CombatCoordinator
     public void PreRoot(BehaviorContext ctx)
     {
         Flasks.Tick(ctx);
+        _selfBuffs.Tick(ctx);
         AdvanceRequiredBuffPulse(ctx);
         AdvanceDousePulse();
     }
@@ -159,6 +186,11 @@ public sealed class CombatCoordinator
         Skills.Reset();
         Flasks.Reset();
         _engageFollow.Reset();
+        _flickerFollow.Reset();
+        _flickerTarget = null;
+        _rangedFollow.Reset();
+        _rangedReposition.Reset();
+        _selfBuffs.Reset();
         _damageEvidence.Reset();
         _requiredBuffAttempts = 0;
         _requiredBuffLastCastAt = TimeSpan.Zero;
@@ -174,8 +206,10 @@ public sealed class CombatCoordinator
         _proximityEvidenceThisTick = false;
         _attackIssuedThisTick = false;
         _attackIssuedTargetId = 0;
+        _rangedToughExposureAt = TimeSpan.MinValue;
         _engagePreferDensity = false;
         _engageAdditionalSkip = null;
+        _rangedAdditionalSkip = null;
         _rfFatalReason = null;
     }
 
@@ -187,6 +221,10 @@ public sealed class CombatCoordinator
         _requiredBuffPulse?.Release();
         _requiredBuffPulse = null;
         _requiredBuffPulseStartedAt = TimeSpan.Zero;
+        _selfBuffs.Reset();
+        _rangedFollow.Reset();
+        _rangedReposition.Reset();
+        _rangedToughExposureAt = TimeSpan.MinValue;
     }
 
     // ── Postures ──────────────────────────────────────────────────────────
@@ -212,13 +250,34 @@ public sealed class CombatCoordinator
         }
     }
 
-    /// <summary>Low HP: kite away from the nearest enemy, still firing.</summary>
+    /// <summary>Low HP: stop attacking and create separation, preferring a ready dash.</summary>
     public BehaviorStatus RetreatTick(BehaviorContext ctx)
     {
-        var away = RetreatPoint(ctx);
+        var attack = PickAttackSlot(ctx.Settings);
+        if (attack is not null)
+            Combat.StopChannel(attack);
+
+        if (ctx.Settings.MapClearStance == 2
+            && (_rangedReposition.IsActive
+                || Skills.PickReady(ctx.Settings.Skills.OfRole(SkillRole.Dash)) is not null))
+        {
+            var reposition = _rangedReposition.Tick(ctx);
+            if (reposition != BehaviorStatus.Failure)
+                return BehaviorStatus.Running;
+        }
+
+        // A ranged build does not spend the entire Blink Arrow recharge window doing zero
+        // damage. Once the dash has created standoff, hold the primary attack to leech and kill;
+        // only keep walking when an eligible threat is still too close or cannot be shot. The
+        // next ready dash preempts this branch above, producing the intended W -> Q -> W chain.
+        if (ctx.Settings.MapClearStance == 2
+            && attack is not null
+            && TryAttackFromSafeRetreatStandoff(ctx, attack))
+            return BehaviorStatus.Running;
+
+        var away = RetreatPoint(ctx, allowGapCrossing: false, RetreatStepGrid);
         if (away is { } a) Movement.WalkToward(a, new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
         else Movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
-        TapBiggestThreat(ctx);
         return BehaviorStatus.Running;
     }
 
@@ -233,6 +292,66 @@ public sealed class CombatCoordinator
         if (result == BehaviorStatus.Running) MarkAttackIssued(target.Id, q);
         _qHeldThisTick = true;
         return BehaviorStatus.Running;
+    }
+
+    /// <summary>
+    /// Flicker Strike is both the build's damage and its movement/defence loop. Route to the
+    /// nearest active hostile, then hold the skill continuously so it can teleport through
+    /// the pack. This intentionally owns low-HP ticks too; generic retreat stops Flicker and
+    /// leaves the character standing among an add wave without leech or damage.
+    /// </summary>
+    public BehaviorStatus FlickerEngageTick(BehaviorContext ctx)
+    {
+        var attack = PickAttackSlot(ctx.Settings);
+        _flickerTarget = SelectFlickerTarget(ctx);
+        if (!IsFlickerStrike(attack) || _flickerTarget is null || ctx.Live is not { } live)
+        {
+            if (attack is not null) Combat.StopChannel(attack);
+            _flickerFollow.Reset();
+            return BehaviorStatus.Failure;
+        }
+
+        if (Distance(live.GridPosition, _flickerTarget.GridPosition) > AttackRange(ctx))
+        {
+            Combat.StopChannel(attack!);
+            _flickerFollow.Tick(ctx);
+            return BehaviorStatus.Running;
+        }
+
+        _flickerFollow.Reset();
+        Movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+        var result = Combat.HoldChannel(attack!, Aim.AtEntity(_flickerTarget.Id), ctx);
+        if (result == BehaviorStatus.Running)
+        {
+            _qHeldThisTick = true;
+            MarkAttackIssued(_flickerTarget.Id, attack!);
+        }
+        return BehaviorStatus.Running;
+    }
+
+    public EntityCache.Entry? SelectFlickerTarget(BehaviorContext ctx)
+    {
+        if (!IsFlickerStrike(PickAttackSlot(ctx.Settings))) return null;
+        var seekRange = Math.Max(220f, ctx.Settings.CombatEngageRange);
+        // Keep the current pursuit stable. Re-selecting the Euclidean-nearest hostile on
+        // every frame lets two packs on opposite sides of the character alternate ownership
+        // as it moves, producing a permanent back-and-forth route. A committed target remains
+        // ours until it actually dies/disappears, is blacklisted, or leaves the seek radius.
+        if (_flickerTarget is { } previous
+            && ctx.Entities?.Entries.TryGetValue(previous.Id, out var locked) == true
+            && TargetEligibility.IsEligible(locked)
+            && !IsBlacklisted(locked.Id)
+            && ctx.Live is { } live
+            && Distance(live.GridPosition, locked.GridPosition) <= seekRange)
+            return locked;
+
+        _flickerTarget = null;
+        // Long-range Euclidean selection can see a monster through an entire wall section.
+        // That lets combat preempt exploration forever while the approach repeatedly tries
+        // to Leap Slam through terrain. Exploration owns routing around occlusion; Flicker
+        // takes over as soon as a clear chain target is exposed.
+        return _flickerTarget = Threat.Nearest(
+            ctx, seekRange, skip: IsBlacklisted, requireLos: true);
     }
 
     /// <summary>
@@ -285,6 +404,190 @@ public sealed class CombatCoordinator
             _engageFollow.Tick(ctx);
         }
         return BehaviorStatus.Running;
+    }
+
+    /// <summary>
+    /// Ranged engage: close only until the configured standoff has a walkable line of fire,
+    /// then stop and hold an auto-repeat primary attack at the selected threat. The dedicated
+    /// approach path may spend a ready Dash on long legs; ordinary exploration remains walk-first.
+    /// </summary>
+    public BehaviorStatus RangedEngageTick(
+        BehaviorContext ctx,
+        Func<EntityCache.Entry, bool>? additionalSkip = null)
+    {
+        _rangedAdditionalSkip = additionalSkip;
+        var attack = PickAttackSlot(ctx.Settings);
+        if (attack is null || ctx.Live is not { } live)
+        {
+            if (attack is not null) Combat.StopChannel(attack);
+            _rangedFollow.Reset();
+            _rangedReposition.Reset();
+            _damageEvidence.ClearEngagement();
+            return BehaviorStatus.Failure;
+        }
+
+        // Once W has fired, this branch must retain ownership until observed displacement or
+        // timeout. If target selection flickers for one frame and exploration takes over, its
+        // ordinary walking can otherwise be mistaken for a delayed Blink Arrow landing.
+        if (_rangedReposition.IsActive)
+        {
+            Combat.StopChannel(attack);
+            _rangedFollow.Reset();
+            _damageEvidence.ClearEngagement();
+            var reposition = _rangedReposition.Tick(ctx);
+            if (reposition != BehaviorStatus.Failure)
+                return BehaviorStatus.Running;
+        }
+
+        var target = SelectRangedTarget(ctx, additionalSkip);
+        if (target is null)
+        {
+            Combat.StopChannel(attack);
+            _rangedFollow.Reset();
+            _damageEvidence.ClearEngagement();
+            return BehaviorStatus.Failure;
+        }
+
+        var distance = Distance(live.GridPosition, target.GridPosition);
+        var stopAt = Math.Min(Math.Max(10f, ctx.Settings.RangedStandoffGrid), AttackRange(ctx));
+        var hasLineOfFire = ctx.Snapshot.Nav.PathReader is not { } path
+            || BubblesBot.Core.Pathfinding.PathSmoother.HasLineOfSight(
+                path, live.GridPosition.X, live.GridPosition.Y,
+                target.GridPosition.X, target.GridPosition.Y, minValue: 1);
+
+        if (TryRangedReposition(ctx, attack))
+            return BehaviorStatus.Running;
+
+        if (distance <= stopAt && hasLineOfFire)
+        {
+            _rangedFollow.Reset();
+            Movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+            BehaviorStatus result;
+            if (attack.HoldToRepeat)
+            {
+                result = Combat.HoldChannel(attack, Aim.AtEntity(target.Id), ctx);
+                _qHeldThisTick = result == BehaviorStatus.Running;
+            }
+            else if (Skills.IsReady(attack))
+            {
+                result = Combat.Cast(attack, Aim.AtEntity(target.Id), ctx, "ranged attack");
+                if (result == BehaviorStatus.Success) Skills.MarkCast(attack);
+            }
+            else
+            {
+                result = BehaviorStatus.Running;
+            }
+
+            if (result is BehaviorStatus.Running or BehaviorStatus.Success)
+                MarkAttackIssued(target.Id, attack);
+            return BehaviorStatus.Running;
+        }
+
+        Combat.StopChannel(attack);
+        _damageEvidence.ClearEngagement();
+        _rangedFollow.Tick(ctx);
+        return BehaviorStatus.Running;
+    }
+
+    private bool TryRangedReposition(BehaviorContext ctx, SkillSlot attack)
+    {
+        if (ctx.Live is not { } live)
+            return false;
+
+        var hpFraction = live.HpMax > 0 ? (float)live.HpCurrent / live.HpMax : 1f;
+        var healthPressure = ctx.Settings.RangedKiteHpPercent > 0
+            && hpFraction < ctx.Settings.RangedKiteHpPercent / 100f;
+
+        var toughRange = Math.Max(ctx.Settings.CombatEngageRange, AttackRange(ctx) + 30f);
+        var tough = ctx.Settings.RangedKiteToughTargets
+            ? Threat.Biggest(ctx, toughRange, requireLos: false, skip: IsBlacklisted)
+            : null;
+        var toughPressure = tough is not null && Threat.IsToughTarget(tough);
+        var now = BotMonotonicClock.Now;
+        if (!toughPressure)
+            _rangedToughExposureAt = TimeSpan.MinValue;
+        else if (_rangedToughExposureAt == TimeSpan.MinValue)
+            _rangedToughExposureAt = now;
+
+        var toughWindowElapsed = toughPressure
+            && BotMonotonicClock.ElapsedSince(_rangedToughExposureAt).TotalMilliseconds
+                >= ToughTargetAttackWindowMs;
+        var dashReady = Skills.PickReady(ctx.Settings.Skills.OfRole(SkillRole.Dash)) is not null;
+        var shouldDash = _rangedReposition.IsActive
+            || ((healthPressure || toughWindowElapsed) && dashReady);
+
+        if (shouldDash)
+        {
+            Combat.StopChannel(attack);
+            _rangedFollow.Reset();
+            _damageEvidence.ClearEngagement();
+            var result = _rangedReposition.Tick(ctx);
+            if (result != BehaviorStatus.Failure)
+            {
+                if (toughWindowElapsed)
+                    _rangedToughExposureAt = now;
+                return true;
+            }
+        }
+
+        // A meaningful hit still owns the posture while Blink Arrow is recharging.
+        if (healthPressure)
+        {
+            Combat.StopChannel(attack);
+            _rangedFollow.Reset();
+            var away = RetreatPoint(ctx, allowGapCrossing: false, RetreatStepGrid);
+            if (away is { } point)
+                Movement.WalkToward(point, new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+            else
+                Movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryAttackFromSafeRetreatStandoff(BehaviorContext ctx, SkillSlot attack)
+    {
+        if (ctx.Live is not { } live)
+            return false;
+
+        var target = Threat.Nearest(ctx, AttackRange(ctx), skip: IsBlacklisted);
+        if (target is null)
+            return false;
+
+        var distance = Distance(live.GridPosition, target.GridPosition);
+        if (!RangedRetreatPolicy.ShouldAttackWhileDashRecharges(
+                distance, AttackRange(ctx), ctx.Settings.RangedStandoffGrid))
+            return false;
+
+        var path = ctx.Snapshot.Nav.PathReader;
+        if (path is not null
+            && !BubblesBot.Core.Pathfinding.PathSmoother.HasLineOfSight(
+                path, live.GridPosition.X, live.GridPosition.Y,
+                target.GridPosition.X, target.GridPosition.Y, minValue: 1))
+            return false;
+
+        Movement.Halt(new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live));
+        var result = Combat.HoldChannel(attack, Aim.AtEntity(target.Id), ctx);
+        if (result == BehaviorStatus.Running)
+        {
+            _qHeldThisTick = true;
+            MarkAttackIssued(target.Id, attack);
+        }
+        return result is BehaviorStatus.Running or BehaviorStatus.Success;
+    }
+
+    public EntityCache.Entry? SelectRangedTarget(
+        BehaviorContext ctx,
+        Func<EntityCache.Entry, bool>? additionalSkip = null)
+    {
+        var range = Math.Max(ctx.Settings.CombatEngageRange, AttackRange(ctx) + 30f);
+        // Nearest-first is the safe ranged policy: choosing a farther rare/unique can route
+        // straight through ordinary monsters that are already threatening the character.
+        return Threat.Nearest(ctx, range,
+            skip: id => IsBlacklisted(id)
+                || (ctx.Entities?.Entries.TryGetValue(id, out var entry) == true
+                    && additionalSkip?.Invoke(entry) == true));
     }
 
     /// <summary>
@@ -433,15 +736,30 @@ public sealed class CombatCoordinator
     }
 
     public Vector2i? RetreatPoint(BehaviorContext ctx)
+        => RetreatPoint(ctx, allowGapCrossing: false, RetreatStepGrid);
+
+    private Vector2i? RetreatPoint(BehaviorContext ctx, bool allowGapCrossing, float distance)
     {
-        if (ctx.Live is null) return null;
-        var p = ctx.Live.Value.GridPosition;
-        var near = Threat.Nearest(ctx, ctx.Settings.CombatEngageRange);
-        if (near is null) return null;
-        float ax = p.X - near.GridPosition.X, ay = p.Y - near.GridPosition.Y;
-        var al = MathF.Sqrt(ax * ax + ay * ay);
-        if (al < 0.1f) { ax = 1; ay = 0; al = 1; }
-        return new Vector2i { X = p.X + (int)(ax / al * RetreatStepGrid), Y = p.Y + (int)(ay / al * RetreatStepGrid) };
+        if (ctx.Live is null || ctx.Entities is null) return null;
+        var player = ctx.Live.Value.GridPosition;
+        var threats = ctx.Entities.Entries.Values
+            .Where(entity => TargetEligibility.IsEligible(entity))
+            .Select(entity => entity.GridPosition)
+            .ToArray();
+        if (threats.Length == 0) return null;
+
+        var layer = allowGapCrossing
+            ? ctx.Snapshot.Nav.TargetingReader
+            : ctx.Snapshot.Nav.PathReader;
+        bool Valid(Vector2i candidate)
+        {
+            if (layer is null) return true;
+            return layer.Read(candidate.X, candidate.Y) > 0
+                && BubblesBot.Core.Pathfinding.PathSmoother.HasLineOfSight(
+                    layer, player.X, player.Y, candidate.X, candidate.Y, minValue: 1);
+        }
+
+        return RetreatDestinationScoring.Choose(player, threats, distance, Valid);
     }
 
     // ── Predicates / helpers ────────────────────────────────────────────────
@@ -452,6 +770,10 @@ public sealed class CombatCoordinator
             if (s.Role == SkillRole.Attack && s.Vk != 0) return s;
         return null;
     }
+
+    public static bool IsFlickerStrike(SkillSlot? slot)
+        => slot is { HoldToRepeat: true }
+        && slot.Name.Contains("Flicker Strike", StringComparison.OrdinalIgnoreCase);
 
     public static float AttackRange(BehaviorContext ctx)
         => PickAttackSlot(ctx.Settings)?.MaxRangeGrid ?? DefaultAttackRange;

@@ -35,8 +35,12 @@ public sealed class BossEvidenceTracker
     /// <summary>Every configured boss fragment has at least one match with death evidence.</summary>
     public bool IsComplete =>
         _fragments.Length > 0
-        && _fragments.All(fragment => _tracked.Values.Any(t =>
-            t.Fragment.Equals(fragment, StringComparison.OrdinalIgnoreCase) && t.State.Dead));
+        && _fragments.All(fragment =>
+            _tracked.Values.Any(t =>
+                t.Fragment.Equals(fragment, StringComparison.OrdinalIgnoreCase) && t.State.Dead)
+            && !_tracked.Values.Any(t =>
+                t.Fragment.Equals(fragment, StringComparison.OrdinalIgnoreCase)
+                && t.State.SeenAlive && !t.State.Dead));
 
     public int BossesSeen => _tracked.Count;
     public int BossesDead => _tracked.Values.Count(t => t.State.Dead);
@@ -50,12 +54,23 @@ public sealed class BossEvidenceTracker
         {
             var fragment = _fragments.FirstOrDefault(f => m.Path.Contains(f, StringComparison.OrdinalIgnoreCase));
             if (fragment is null) continue;
+            // Some Guardian death actors persist as a synthetic 1/1-life monster. It is not a
+            // reappearing phase (real phases retain the encounter's full maximum life) and must
+            // not revoke the positively observed corpse/death record for the same fragment.
+            if (m.HpMax <= 1) continue;
 
             present.Add(m.Id);
             if (!_tracked.TryGetValue(m.Id, out var entry))
                 _tracked[m.Id] = entry = (fragment, new State());
             entry.State.Position = m.Position;
-            if (m.HpCurrent > 0) entry.State.SeenAlive = true;
+            if (m.HpCurrent > 0)
+            {
+                entry.State.SeenAlive = true;
+                // Phased bosses such as the Chimera can temporarily disappear (which looks
+                // exactly like inferred death) and later make the same entity live again.
+                // Fresh positive life evidence always supersedes an earlier death inference.
+                entry.State.Dead = false;
+            }
             if (m.HpMax > 0 && m.HpCurrent <= 0) entry.State.Dead = true;
         }
 

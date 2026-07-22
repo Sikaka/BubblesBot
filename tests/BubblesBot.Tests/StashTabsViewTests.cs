@@ -8,8 +8,10 @@ public sealed class StashTabsViewTests
     [InlineData(1, true)]
     [InlineData(273, true)]
     [InlineData(1000, true)]
+    [InlineData(2023, true)]
+    [InlineData(4096, true)]
     [InlineData(0, false)]
-    [InlineData(1001, false)]
+    [InlineData(4097, false)]
     public void PlausibleCount_AllowsLargeStandardStashes(int count, bool expected)
     {
         Assert.Equal(expected, StashTabsView.IsPlausibleCount(count));

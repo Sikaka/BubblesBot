@@ -39,6 +39,7 @@ public sealed class FollowPath : IBehavior
     private readonly Func<BehaviorContext, Vector2i?> _goalSelector;
     private readonly SkillBook? _skillBook;
     private readonly bool _allowGapCrossing;
+    private readonly bool _preferDashForLongTravel;
     /// <summary>
     /// How close to the final cell counts as "arrived." When null, falls back to the user's
     /// configured <see cref="BotSettings.InteractionRangeGrid"/> — appropriate for
@@ -58,6 +59,7 @@ public sealed class FollowPath : IBehavior
     private TimeSpan _blinkPhaseAt;
     private Vector2i _blinkFromCell;
     private int _blinkAttempts;
+    private double _blinkSettleMs = BlinkSettleMs;
     private TimeSpan _walkAroundUntil; // while in the future, recompute walk-only
     private const double BlinkAimMs = 140;       // hold the cursor across the gap before firing
     private const double BlinkSettleMs = 400;    // wait after firing to see if we actually crossed
@@ -87,13 +89,14 @@ public sealed class FollowPath : IBehavior
     public FollowPath(string name, MovementSystem movement, Func<BehaviorContext, Vector2i?> goalSelector,
         SkillBook? skillBook = null, float? goalArrivalRadius = null,
         Func<BehaviorContext, float>? goalArrivalRadiusProvider = null,
-        bool allowGapCrossing = true)
+        bool allowGapCrossing = true, bool preferDashForLongTravel = false)
     {
         Name = name;
         _movement = movement;
         _goalSelector = goalSelector;
         _skillBook = skillBook;
         _allowGapCrossing = allowGapCrossing;
+        _preferDashForLongTravel = preferDashForLongTravel;
         _goalArrivalOverride = goalArrivalRadius;
         _goalArrivalProvider = goalArrivalRadiusProvider;
     }
@@ -149,7 +152,11 @@ public sealed class FollowPath : IBehavior
         var needRecompute = _path is null
             || _path.Count == 0
             || _pathIndex >= _path.Count
-            || (now - _pathBuiltAt) > MaxPathAge
+            // Do not throw away an in-flight blink merely because the cached path aged out.
+            // A failed Leap Slam cycle takes long enough that the four-second path refresh
+            // could reset its retry counter before MaxBlinkAttempts, producing an endless
+            // cast loop at the same ledge. Resolve or give up the blink first; then rebuild.
+            || (_blinkPhase == BlinkPhase.Idle && (now - _pathBuiltAt) > MaxPathAge)
             || Distance(_pathGoal, goal.Value) > GoalMovementThreshold;
 
         if (needRecompute)
@@ -234,6 +241,22 @@ public sealed class FollowPath : IBehavior
         var step = _path[_pathIndex];
         var stepGrid = new Vector2i { X = step.X, Y = step.Y };
 
+        // A ranged build benefits from spending its movement skill proactively while closing:
+        // Blink Arrow lands after an animation delay but avoids walking the same distance with
+        // the attack idle. The ordinary navigation paths keep this opt-in disabled.
+        if (_preferDashForLongTravel && ctx.Settings.RangedUseDashToClose
+            && _allowGapCrossing && ctx.Settings.AllowGapCrossing && _skillBook is not null
+            // Keep one full dash inside the requested arrival ring. This prevents a dash
+            // fired at 46 grids with a 45-grid standoff from landing in melee range.
+            && Distance(player, goal.Value) >= goalArrival + BlinkAimGrid
+            && Distance(player, stepGrid) >= BlinkAimGrid)
+        {
+            var outcome = RunBlink(ctx, player, stepGrid, $"dash-close {_pathIndex}/{_path.Count - 1}");
+            if (outcome == BlinkOutcome.Landed) _path = null;
+            else if (outcome == BlinkOutcome.GiveUp) BeginWalkAround();
+            return LastStatus = BehaviorStatus.Running;
+        }
+
         // Explicit A* blink step → run the blink state machine toward the landing cell.
         if (step.Action == StepAction.Blink && _skillBook is not null)
         {
@@ -246,7 +269,8 @@ public sealed class FollowPath : IBehavior
         // Stuck on a WALK step (ledge/blocker the static nav layer can't see), or a recovery
         // blink already in progress → run the blink state machine to cross it.
         if (_allowGapCrossing && ctx.Settings.AllowGapCrossing
-            && _skillBook is not null && (_blinkPhase != BlinkPhase.Idle || stuck))
+            && _skillBook is not null
+            && (_blinkPhase != BlinkPhase.Idle || (stuck && now >= _walkAroundUntil)))
         {
             var outcome = RunBlink(ctx, player, stepGrid, $"unstick {_pathIndex}/{_path.Count - 1}");
             if (outcome == BlinkOutcome.Landed) _progress.MarkProgress(player, now);
@@ -300,22 +324,30 @@ public sealed class FollowPath : IBehavior
             // floor (Frostblink), silently wasting the cast + a retry. If the landing is closer
             // than the dash's minimum, don't blink here — route on foot instead. Default
             // MinCastDistanceGrid == 0 disables the guard (unchanged behavior).
-            if (dash.MinCastDistanceGrid > 0 && Distance(player, landing) < dash.MinCastDistanceGrid)
+            // The cursor is aimed at `aim`, deliberately extended well beyond the first
+            // across-gap path cell. Validate the distance PoE will actually receive, not the
+            // nearby landing marker; using `landing` rejected valid Leap Slams at an 8-cell
+            // Phoenix ledge even though the cursor was thrown 22 cells across it.
+            var castDistance = Distance(player, aim);
+            if (dash.MinCastDistanceGrid > 0 && castDistance < dash.MinCastDistanceGrid)
             {
                 _blinkPhase = BlinkPhase.Idle;
-                LastDecision = $"{tag} BLINK too short ({Distance(player, landing):F0}<{dash.MinCastDistanceGrid}) -> walk";
+                LastDecision = $"{tag} BLINK too short ({castDistance:F0}<{dash.MinCastDistanceGrid}) -> walk";
                 return BlinkOutcome.GiveUp;
             }
 
             if ((now - _blinkPhaseAt).TotalMilliseconds < BlinkAimMs)
             { LastDecision = $"{tag} BLINK aiming"; return BlinkOutcome.InProgress; }
 
-            var ticket = ctx.Input.TapKey(dash.Vk, ClickIntent.UseSkill, $"blink {dash.Name}");
+            var ticket = ctx.Input.TapKey(
+                dash.Vk, ClickIntent.UseSkill,
+                $"{Name} blink {dash.Name} attempt {_blinkAttempts + 1}/{MaxBlinkAttempts}");
             if (ticket.Accepted)
             {
                 _skillBook.MarkCast(dash);
                 BlinksFired++;
                 _blinkFromCell = player;
+                _blinkSettleMs = Math.Max(BlinkSettleMs, dash.CastTimeMs + 300);
                 _blinkPhase = BlinkPhase.Settle;
                 _blinkPhaseAt = now;
                 LastDecision = $"{tag} BLINK fired ({dash.Name})";
@@ -325,7 +357,7 @@ public sealed class FollowPath : IBehavior
         }
 
         // Settle: wait, then confirm we crossed.
-        if ((now - _blinkPhaseAt).TotalMilliseconds < BlinkSettleMs)
+        if ((now - _blinkPhaseAt).TotalMilliseconds < _blinkSettleMs)
         { LastDecision = $"{tag} BLINK settling"; return BlinkOutcome.InProgress; }
 
         if (Distance(player, _blinkFromCell) >= BlinkSuccessMove)

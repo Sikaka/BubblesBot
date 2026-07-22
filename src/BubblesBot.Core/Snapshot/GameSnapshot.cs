@@ -134,6 +134,10 @@ public sealed class GameSnapshot
     /// </summary>
     public AtlasPanelView AtlasPanel => AtlasPanelView.FromIngameUi(_reader, _ingameStateAddress);
 
+    /// <summary>Standalone Kirac invitation/map receptacle, distinct from <see cref="AtlasPanel"/>.</summary>
+    public MapReceptacleView MapReceptacle
+        => MapReceptacleView.FromIngameUi(_reader, _ingameStateAddress);
+
     /// <summary>
     /// Ultimatum between-wave / mod-selection panel. <see cref="UltimatumPanelView.IsVisible"/>
     /// is the gate the mode polls to know when a round has completed and choices are up.

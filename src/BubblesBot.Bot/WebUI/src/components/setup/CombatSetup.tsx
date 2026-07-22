@@ -50,11 +50,13 @@ const PRESETS: CombatPreset[] = [
     name: "Ranged attacker",
     eyebrow: "Bow / spell caster",
     description: "Stay near packs and cast toward enemies. The current engine uses drive-by attacks; continuous orbiting is phase 2.",
-    support: "foundation",
-    behavior: ["Find a nearby pack", "Stay in attack range", "Aim and cast", "Continue exploring"],
+    support: "ready",
+    behavior: ["Find a nearby pack", "Dash or close to line-of-fire", "Stop at standoff range", "Hold attack and retarget"],
     values: {
-      mapClearStance: 0,
-      combatEngageRange: 60,
+      mapClearStance: 2,
+      combatEngageRange: 85,
+      rangedStandoffGrid: 45,
+      rangedUseDashToClose: true,
       minPackDetourSize: 4,
     },
   },
@@ -91,6 +93,7 @@ export function CombatSetup({ schema, values, saved, onChange, onApply }: Props)
 
   const selectedId = stance === 1
     ? (holdRadius >= 20 ? "minion-escort" : "triggered-tank")
+    : stance === 2 ? "ranged"
     : Number(setting("combatEngageRange") ?? 50) <= 35 ? "melee" : "ranged";
   const selected = PRESETS.find((preset) => preset.id === selectedId) ?? PRESETS[0];
 

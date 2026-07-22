@@ -129,7 +129,7 @@ public sealed class SettingsStore
             // Mode 6 is the production Simulacrum adapter (the old Ultimatum prototype is
             // retained as research code but is no longer dispatched).
             if (settings.ActiveMode is 8 or 9) settings.ActiveMode = 4;
-            else if (settings.ActiveMode is not (0 or 4 or 5 or 6)) settings.ActiveMode = 0;
+            else if (settings.ActiveMode is not (0 or 4 or 5 or 6 or 7)) settings.ActiveMode = 0;
             return settings;
         }
         catch

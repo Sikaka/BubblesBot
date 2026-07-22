@@ -7,13 +7,11 @@ namespace BubblesBot.Bot.Systems;
 /// <summary>
 /// Per-area registry of accepted ground loot the bot has seen. Ground labels only exist in
 /// memory while rendered — an item dropped behind the sweep (minion kills happen off-path)
-/// vanishes from the live list the moment it scrolls off screen. This memory is what makes
-/// "backtrack for valuable loot" possible: the zone loop drains it before taking the next
-/// area transition.
+/// vanishes from the live list the moment it scrolls off screen. This registry lets a bounded
+/// mechanic cleanup finish its immediate arena/circle; it never authorizes whole-map backtracking.
 ///
 /// <para>Valuation runs through the shared <c>ValueFilter</c>. Generic modes may apply the
-/// configured backtrack value floor; the stacked-deck preset remembers every item accepted
-/// by the player's loot filter because continuing the map must never strand visible drops.
+/// configured local-memory value floor or remember every item accepted by the player's filter.
 /// Entries are forgotten when the player stands next to the spot and no label remains.</para>
 /// </summary>
 public sealed class LootMemory
@@ -45,8 +43,8 @@ public sealed class LootMemory
         }
 
         var filter = LootClosestVisible.SharedValueFilter;
-        // The strategy may override the profile's backtrack threshold; 0 = remember every
-        // accepted label (stacked decks are individually below any sane profile threshold).
+        // The strategy may override the profile's local-cleanup threshold; 0 = remember every
+        // accepted label while a mechanic's bounded settle phase owns the drain.
         var minChaos = Math.Max(0f,
             ctx.Strategy?.Loot.BacktrackMinChaosOverride ?? ctx.Settings.LootBacktrackMinChaos);
         if (filter is null)

@@ -44,6 +44,7 @@ public static class EntityDispositionCatalog
         ("/Monsters/Mirage/",       EntityDisposition.Ignore),
         // The Maven WITNESSING a map — invulnerable observer hovering over the fight.
         // (Her actual boss-fight entity uses a different path and stays Combatant.)
+        ("/MavenBoss/TheMavenMapVolatileOrb", EntityDisposition.Hazard),
         ("/MavenBoss/TheMavenMap",  EntityDisposition.Ignore),
         // Animated-item visual entities.
         ("/AnimatedItem/",          EntityDisposition.Ignore),

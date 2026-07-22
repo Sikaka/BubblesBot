@@ -1,4 +1,7 @@
 using BubblesBot.Bot.Behaviors;
+using BubblesBot.Bot.Behaviors.Movement;
+using BubblesBot.Bot.Behaviors.Interact;
+using BubblesBot.Bot.Modes;
 using BubblesBot.Core.Game;
 using BubblesBot.Core.Snapshot;
 
@@ -18,7 +21,7 @@ namespace BubblesBot.Bot.Systems;
 /// </summary>
 public sealed class LeaveMapSystem
 {
-    public enum Phase { Idle, CastPortal, EnterPortal, Done, Failed }
+    public enum Phase { Idle, CastPortal, ReturnToEntrance, EnterPortal, Done, Failed }
     public enum Result { InProgress, Succeeded, Failed }
 
     public Phase CurrentPhase { get; private set; } = Phase.Idle;
@@ -28,6 +31,8 @@ public sealed class LeaveMapSystem
     private readonly MovementSystem _movement;
     private readonly Func<int>      _getPortalVk;
     private readonly Func<BehaviorContext, bool> _isExpectedDestination;
+    private readonly FollowPath? _returnToEntrance;
+    private readonly EnterAreaTransition? _returnThroughArenaExit;
     private readonly AreaTransitionTracker _transition = new();
 
     private TimeSpan _phaseStartedAt;
@@ -36,11 +41,20 @@ public sealed class LeaveMapSystem
     private int      _castAttempts;
     private uint     _startAreaHash;
     private TimeSpan _portalInRangeSince;
+    private bool     _inventoryFallbackStarted;
+    private int      _inventoryScrollAttempts;
+    private Vector2i? _returnAnchor;
+    private Vector2i? _returnGoal;
+    private TimeSpan _returnAnchorReachedAt;
+    private readonly InteractSystem _returnInteract = new();
 
     private const int ActionCooldownMs    = 600;
     private const int MaxCastAttempts     = 4;
     private const int PhaseTimeoutSeconds = 20;
     private const int CastTimeoutSeconds  = 12;
+    private const int ReturnTimeoutSeconds = 180;
+    private const int InventoryKeyVk       = 0x49; // I
+    private const int MaxInventoryScrollAttempts = 3;
 
     /// <summary>
     /// A town portal only counts as usable when it sits this close to the player. Scroll
@@ -56,14 +70,29 @@ public sealed class LeaveMapSystem
     public AreaTransitionState Transition => _transition.State;
 
     public LeaveMapSystem(MovementSystem movement, Func<int> getPortalVk,
-        Func<BehaviorContext, bool> isExpectedDestination)
+        Func<BehaviorContext, bool> isExpectedDestination, SkillBook? skills = null,
+        Func<GameSnapshot?>? getSnapshot = null)
     {
         _movement    = movement;
         _getPortalVk = getPortalVk;
         _isExpectedDestination = isExpectedDestination;
+        if (skills is not null)
+        {
+            _returnToEntrance = new FollowPath(
+                "return to original map portal", movement, _ => _returnGoal,
+                skills, goalArrivalRadius: 12f, allowGapCrossing: true,
+                preferDashForLongTravel: true);
+            if (getSnapshot is not null)
+            {
+                _returnThroughArenaExit = new EnterAreaTransition(
+                    "leave completed boss sub-area", _returnInteract, movement, skills,
+                    getSnapshot, MapTransitionPolicy.IsTraversalCandidate,
+                    allowGapCrossing: false);
+            }
+        }
     }
 
-    public void Start(BehaviorContext ctx)
+    public void Start(BehaviorContext ctx, Vector2i? returnAnchor = null)
     {
         CurrentPhase    = Phase.CastPortal;
         _phaseStartedAt = BotMonotonicClock.Now;
@@ -72,6 +101,13 @@ public sealed class LeaveMapSystem
         _castAttempts   = 0;
         _startAreaHash  = ctx.Snapshot.AreaHash;
         _portalInRangeSince = TimeSpan.MinValue;
+        _inventoryFallbackStarted = false;
+        _inventoryScrollAttempts = 0;
+        _returnAnchor = returnAnchor;
+        _returnGoal = returnAnchor;
+        _returnAnchorReachedAt = TimeSpan.MinValue;
+        _returnToEntrance?.Reset();
+        _returnThroughArenaExit?.Reset();
         _transition.Start(_startAreaHash, AreaRole.Map, AreaRole.SafeHub, AreaTransitionTracker.MonotonicNow());
 
         Status = "opening town portal";
@@ -81,6 +117,8 @@ public sealed class LeaveMapSystem
     public void Cancel()
     {
         CurrentPhase = Phase.Idle;
+        _returnToEntrance?.Reset();
+        _returnThroughArenaExit?.Reset();
         _movement.Release();
         Status = "cancelled";
     }
@@ -123,7 +161,12 @@ public sealed class LeaveMapSystem
             return Result.InProgress;
         }
 
-        var timeout = CurrentPhase == Phase.CastPortal ? CastTimeoutSeconds : PhaseTimeoutSeconds;
+        var timeout = CurrentPhase switch
+        {
+            Phase.CastPortal => CastTimeoutSeconds,
+            Phase.ReturnToEntrance => ReturnTimeoutSeconds,
+            _ => PhaseTimeoutSeconds,
+        };
         if ((BotMonotonicClock.Now - _phaseStartedAt).TotalSeconds > timeout)
             return Fail($"timeout in {CurrentPhase}: {Status}");
 
@@ -133,6 +176,7 @@ public sealed class LeaveMapSystem
         return CurrentPhase switch
         {
             Phase.CastPortal  => TickCast(ctx),
+            Phase.ReturnToEntrance => TickReturnToEntrance(ctx),
             Phase.EnterPortal => TickEnter(ctx),
             _ => Result.InProgress,
         };
@@ -145,14 +189,25 @@ public sealed class LeaveMapSystem
         var portal = FindNewTownPortal(ctx);
         if (portal is not null)
         {
+            if (ctx.Snapshot.Inventory.IsOpen)
+            {
+                var close = ctx.Input.TapKey(
+                    InventoryKeyVk, Input.ClickIntent.InteractUi,
+                    "close inventory after using Portal Scroll");
+                if (close.Accepted)
+                {
+                    _lastActionAt = BotMonotonicClock.Now;
+                    Status = "closing inventory before entering town portal";
+                }
+                return Result.InProgress;
+            }
             _portalEntityId = portal.Id;
             return Advance(Phase.EnterPortal, $"town portal id={portal.Id} — entering");
         }
 
         if (_castAttempts >= MaxCastAttempts)
         {
-            LogPortalCensus(ctx); // ground truth for "the user saw a portal but we didn't"
-            return Fail("no town portal after tapping portal key — likely out of portal scrolls");
+            return TickCastFromInventory(ctx);
         }
 
         var vk = _getPortalVk();
@@ -168,6 +223,140 @@ public sealed class LeaveMapSystem
             BubblesBot.Bot.Diagnostics.EventLog.Log("LeaveMap", $"portal key tapped (vk=0x{vk:X})");
         }
         return Result.InProgress;
+    }
+
+    private Result TickCastFromInventory(BehaviorContext ctx)
+    {
+        if (!_inventoryFallbackStarted)
+        {
+            _inventoryFallbackStarted = true;
+            _phaseStartedAt = BotMonotonicClock.Now;
+            Status = "portal hotkey produced no portal - trying carried Portal Scroll";
+            Diagnostics.EventLog.Emit(
+                "leave-map", "leave-map.inventory-scroll-fallback",
+                Diagnostics.EventSeverity.Warning, Status);
+        }
+
+        if (!ctx.Snapshot.Inventory.IsOpen)
+        {
+            var open = ctx.Input.TapKey(
+                InventoryKeyVk, Input.ClickIntent.InteractUi,
+                "open inventory for Portal Scroll fallback");
+            if (open.Accepted)
+            {
+                _lastActionAt = BotMonotonicClock.Now;
+                Status = "opening inventory for Portal Scroll fallback";
+            }
+            return Result.InProgress;
+        }
+
+        var scroll = BestPortalScroll(ctx.Snapshot.Inventory.Items);
+        if (scroll is not { Rect: { } rect })
+        {
+            LogPortalCensus(ctx);
+            if (_returnAnchor is not null && _returnToEntrance is not null)
+                return Advance(Phase.ReturnToEntrance,
+                    "no Portal Scroll - returning to the original map entrance");
+            return Fail("portal hotkey failed and no carried Portal Scroll was visible");
+        }
+        if (_inventoryScrollAttempts >= MaxInventoryScrollAttempts)
+        {
+            LogPortalCensus(ctx);
+            return Fail("carried Portal Scroll did not create a town portal");
+        }
+
+        var point = ctx.Snapshot.Window.ToScreen((int)rect.CenterX, (int)rect.CenterY);
+        var ticket = ctx.Input.RightClick(
+            point.X, point.Y, Input.ClickIntent.InteractUi,
+            "use carried Portal Scroll",
+            expectResolved: () => FindNewTownPortal(ctx) is not null,
+            timeoutMs: 2500);
+        if (ticket.Accepted)
+        {
+            _inventoryScrollAttempts++;
+            _lastActionAt = BotMonotonicClock.Now;
+            Status = $"right-clicked carried Portal Scroll ({_inventoryScrollAttempts}/{MaxInventoryScrollAttempts})";
+        }
+        return Result.InProgress;
+    }
+
+    private Result TickReturnToEntrance(BehaviorContext ctx)
+    {
+        if (_returnAnchor is not { } anchor || _returnToEntrance is null)
+            return Fail("original map entrance was not recorded");
+
+        if (ctx.Snapshot.Inventory.IsOpen)
+        {
+            var close = ctx.Input.TapKey(
+                InventoryKeyVk, Input.ClickIntent.InteractUi,
+                "close inventory before returning to original portal");
+            if (close.Accepted)
+            {
+                _lastActionAt = BotMonotonicClock.Now;
+                Status = "closing inventory before backtracking";
+            }
+            return Result.InProgress;
+        }
+
+        var portal = FindOriginalEntrancePortal(ctx, anchor);
+        _returnGoal = portal?.GridPosition ?? anchor;
+
+        var route = _returnToEntrance.Tick(ctx);
+        Status = portal is null
+            ? $"backtracking to map entrance: {_returnToEntrance.LastDecision}"
+            : $"backtracking to original portal id={portal.Id}: {_returnToEntrance.LastDecision}";
+
+        if (route == BehaviorStatus.Failure
+            && _returnToEntrance.LastDecision == "no path"
+            && _returnThroughArenaExit is not null
+            && HasFreshTraversalTransition(ctx))
+        {
+            var exit = _returnThroughArenaExit.Tick(ctx);
+            Status = "map entrance is on another sub-area blob - taking the local arena exit";
+            if (exit == BehaviorStatus.Success)
+            {
+                _returnThroughArenaExit.Reset();
+                _returnToEntrance.Reset();
+                Status = "arena exit confirmed - resuming backtrack to map entrance";
+            }
+            return Result.InProgress;
+        }
+
+        if (route != BehaviorStatus.Success)
+            return Result.InProgress;
+
+        _movement.Release();
+        if (portal is not null)
+        {
+            _portalEntityId = portal.Id;
+            return Advance(Phase.EnterPortal, $"reached original map portal id={portal.Id} - entering");
+        }
+
+        if (_returnAnchorReachedAt == TimeSpan.MinValue)
+        {
+            _returnAnchorReachedAt = BotMonotonicClock.Now;
+            Status = "at original map entrance - waiting for portal to stream";
+            return Result.InProgress;
+        }
+        if ((BotMonotonicClock.Now - _returnAnchorReachedAt).TotalSeconds >= 5)
+            return Fail("reached original map entrance but its return portal was absent");
+        return Result.InProgress;
+    }
+
+    internal static InventoryView.Item? BestPortalScroll(
+        IReadOnlyList<InventoryView.Item> items)
+    {
+        InventoryView.Item? best = null;
+        foreach (var item in items)
+        {
+            if (item.Rect is null || !item.Path.Contains(
+                    InventoryView.PortalScrollPathFragment,
+                    StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (best is null || item.StackSize > best.Value.StackSize)
+                best = item;
+        }
+        return best;
     }
 
     private Result TickEnter(BehaviorContext ctx)
@@ -302,6 +491,31 @@ public sealed class LeaveMapSystem
         }
         return best;
     }
+
+    private static EntityCache.Entry? FindOriginalEntrancePortal(
+        BehaviorContext ctx, Vector2i anchor)
+    {
+        if (ctx.Entities is null) return null;
+        EntityCache.Entry? best = null;
+        const long maxD2 = 80L * 80L;
+        var bestD2 = maxD2;
+        foreach (var e in ctx.Entities.Entries.Values)
+        {
+            if (e.IsStale) continue;
+            if (e.Kind is not (EntityListReader.EntityKind.Portal or EntityListReader.EntityKind.TownPortal)
+                && !e.Path.Contains("MultiplexPortal", StringComparison.OrdinalIgnoreCase))
+                continue;
+            long dx = e.GridPosition.X - anchor.X;
+            long dy = e.GridPosition.Y - anchor.Y;
+            var d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; best = e; }
+        }
+        return best;
+    }
+
+    private static bool HasFreshTraversalTransition(BehaviorContext ctx)
+        => ctx.Entities?.Entries.Values.Any(e =>
+            !e.IsStale && MapTransitionPolicy.IsTraversalCandidate(e)) == true;
 
     private static float Distance(Vector2i a, Vector2i b)
     {

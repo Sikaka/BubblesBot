@@ -16,7 +16,7 @@ export interface WizardState {
   settingsVersion: number;
   /** The strategy being built from a template. Null until an archetype is chosen. */
   strategyDraft: FarmingStrategy | null;
-  /** Top-level runtime mode selected by the user: Overlay=0, Atlas=4, Blight=5, Simulacrum=6. */
+  /** Top-level runtime mode: Overlay=0, Atlas=4, Blight=5, Simulacrum=6, Guardian Rota=7. */
   selectedMode: number | null;
 }
 

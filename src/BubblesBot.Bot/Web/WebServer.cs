@@ -723,8 +723,10 @@ public sealed class WebServer : IDisposable
             var flasks   = prop.GetCustomAttribute<SettingFlasksAttribute>() is not null;
             var slist    = prop.GetCustomAttribute<SettingStringListAttribute>();
             var modTable = prop.GetCustomAttribute<SettingModTableAttribute>() is not null;
+            var mapModTable = prop.GetCustomAttribute<SettingMapModifierTableAttribute>() is not null;
 
-            var fieldType = modTable                                     ? "modtable"
+            var fieldType = mapModTable                                  ? "mapmodtable"
+                          : modTable                                     ? "modtable"
                           : flasks                                       ? "flasks"
                           : skills                                       ? "skills"
                           : slist  is not null                           ? "stringlist"
@@ -742,6 +744,8 @@ public sealed class WebServer : IDisposable
 
             object[]? modsCatalog = null;
             object[]? tierOptions = null;
+            object[]? mapModsCatalog = null;
+            object[]? policyOptions = null;
             if (modTable)
             {
                 modsCatalog = BubblesBot.Core.Knowledge.UltimatumModDanger.KnownMods
@@ -749,6 +753,21 @@ public sealed class WebServer : IDisposable
                     .ToArray();
                 tierOptions = BubblesBot.Core.Knowledge.UltimatumModDanger.Tiers
                     .Select(t => (object)new { label = t.Label, value = t.Value })
+                    .ToArray();
+            }
+            if (mapModTable)
+            {
+                mapModsCatalog = BubblesBot.Core.Knowledge.MapModifierCatalog.Known
+                    .Select(m => (object)new
+                    {
+                        key = m.Key,
+                        category = m.Category,
+                        name = m.DisplayName,
+                        defaultPolicy = (int)m.DefaultDisposition,
+                    })
+                    .ToArray();
+                policyOptions = BubblesBot.Core.Knowledge.MapModifierCatalog.Policies
+                    .Select(p => (object)new { label = p.Label, value = p.Value })
                     .ToArray();
             }
 
@@ -767,6 +786,8 @@ public sealed class WebServer : IDisposable
                 options     = options?.Options.Select(o => new { label = o.Label, value = o.Value }).ToArray(),
                 mods        = modsCatalog,
                 tiers       = tierOptions,
+                mapMods     = mapModsCatalog,
+                policies    = policyOptions,
             });
         }
     }

@@ -35,7 +35,12 @@ public sealed record FlightEntity(
     bool SimulacrumGoodbyeKnown = false,
     long SimulacrumGoodbye = 0,
     bool SimulacrumWaveKnown = false,
-    long SimulacrumWave = 0);
+    long SimulacrumWave = 0,
+    bool AreaTransitionIdentityReadable = false,
+    AreaTransitionType AreaTransitionType = AreaTransitionType.Normal,
+    ushort AreaTransitionAreaId = 0,
+    string DestinationAreaId = "",
+    string DestinationAreaName = "");
 
 public sealed record WorldRecordFrame(
     long TickId,

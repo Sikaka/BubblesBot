@@ -1,5 +1,6 @@
 using System.Reflection;
 using BubblesBot.Bot.Settings;
+using BubblesBot.Core.Knowledge;
 
 namespace BubblesBot.Bot.Web;
 
@@ -25,6 +26,14 @@ public static class SettingsValidator
             var message = rule.Check(rule.Getter(settings));
             if (message is not null) errors.Add(new SettingsValidationError(rule.Path, message));
         }
+        if (settings.GuardianInvitationPreferredQuantity
+            < settings.GuardianInvitationMinQuantity)
+            errors.Add(new SettingsValidationError(
+                "guardianInvitationPreferredQuantity",
+                "must be greater than or equal to the minimum invitation quantity"));
+        if (string.IsNullOrWhiteSpace(settings.GuardianDumpTabName))
+            errors.Add(new SettingsValidationError(
+                "guardianDumpTabName", "dump tab name cannot be empty"));
         return errors;
     }
 
@@ -55,6 +64,15 @@ public static class SettingsValidator
             {
                 rules.Add(new Rule(path, Get, value =>
                     value is int vk && vk is >= 0 and <= 255 ? null : "keycode must be 0..255"));
+                continue;
+            }
+
+            if (prop.GetCustomAttribute<SettingMapModifierTableAttribute>() is not null)
+            {
+                rules.Add(new Rule(path, Get, value =>
+                    value is IEnumerable<string> rows
+                        ? MapModifierCatalog.ValidateOverrides(rows)
+                        : "expected a modifier-policy list"));
                 continue;
             }
 

@@ -31,7 +31,14 @@ namespace BubblesBot.Bot.Systems;
 /// </summary>
 public sealed class MapDeviceSystem
 {
-    public enum PayloadSource { AtlasStorage, InventorySimulacrum, InventoryMap, InventoryNormalMap }
+    public enum PayloadSource
+    {
+        AtlasStorage,
+        InventorySimulacrum,
+        InventoryMap,
+        InventoryNormalMap,
+        InventoryGuardianMap,
+    }
     public enum Phase
     {
         Idle,
@@ -62,12 +69,14 @@ public sealed class MapDeviceSystem
     private TimeSpan _lastActionAt;
     private TimeSpan _activateReadySince = TimeSpan.MinValue;
     private TimeSpan _portalInRangeSince = TimeSpan.MinValue;
+    private uint     _originAreaHash;
     private uint     _deviceEntityId;
     private uint     _portalEntityId;
     private int      _clickAttempts;
     private int      _nodeClickAttempts;
     private int      _nodeHoverUiIndex = -1;
     private TimeSpan _nodeHoverStartedAt = TimeSpan.MinValue;
+    private bool     _nodePanActive;
     private int      _nodePanAttempts;
     private int      _nodePanAnchorCandidate;
     private TimeSpan _nodePanHoverStartedAt = TimeSpan.MinValue;
@@ -96,6 +105,7 @@ public sealed class MapDeviceSystem
     private const int  ActivateReadySettleMs  = 700;
     private const int  PortalInRangeSettleMs  = 350;
     private const int  PortalClickTimeoutMs   = 3000;
+    private const int  MaxPortalClickAttempts = 18;
 
     /// <summary>VK_LCONTROL — modifier for "Ctrl+click to insert" (alternate path to right-click).</summary>
     private const int VK_LCONTROL = 0xA2;
@@ -113,6 +123,10 @@ public sealed class MapDeviceSystem
         (0.36, 0.62),
         (0.52, 0.70),
         (0.31, 0.44),
+        (0.60, 0.30),
+        (0.60, 0.78),
+        (0.24, 0.30),
+        (0.24, 0.78),
     ];
 
     public MapDeviceSystem(MovementSystem movement, SkillBook skills,
@@ -145,12 +159,14 @@ public sealed class MapDeviceSystem
         _nodeClickAttempts = 0;
         _nodeHoverUiIndex = -1;
         _nodeHoverStartedAt = TimeSpan.MinValue;
+        _nodePanActive = false;
         _nodePanAttempts = 0;
         _nodePanAnchorCandidate = 0;
         _nodePanHoverStartedAt = TimeSpan.MinValue;
         _activateReadySince = TimeSpan.MinValue;
         _portalInRangeSince = TimeSpan.MinValue;
         _payloadSource = payloadSource;
+        _originAreaHash = _getSnapshot()?.AreaHash ?? 0;
         _deviceAccessGoal = null;
         _oldPortalAccessPrepared = false;
         _deviceAccessAttempt = 0;
@@ -183,6 +199,15 @@ public sealed class MapDeviceSystem
 
     public Result Tick(BehaviorContext ctx)
     {
+        if (CurrentPhase == Phase.EnterPortal
+            && _originAreaHash != 0
+            && ctx.Snapshot.AreaHash != 0
+            && ctx.Snapshot.AreaHash != _originAreaHash)
+        {
+            CurrentPhase = Phase.Done;
+            Status = "map portal transition confirmed by area change";
+            return Result.Succeeded;
+        }
         if (!IsBusy)
             return CurrentPhase == Phase.Done ? Result.Succeeded
                  : CurrentPhase == Phase.Failed ? Result.Failed
@@ -362,6 +387,8 @@ public sealed class MapDeviceSystem
             return TickSelectCarriedMap(ctx);
         if (_payloadSource == PayloadSource.InventoryNormalMap)
             return TickSelectCarriedNormalMap(ctx);
+        if (_payloadSource == PayloadSource.InventoryGuardianMap)
+            return TickSelectCarriedGuardianMap(ctx);
 
         var atlas = ctx.Snapshot.AtlasPanel;
         if (!atlas.IsVisible) return Fail("atlas panel closed unexpectedly during map select");
@@ -509,8 +536,16 @@ public sealed class MapDeviceSystem
         if (rect is null) return Fail($"'{nodeName}' atlas node child {uiIndex} has no rectangle");
         var centerX = rect.Value.CenterX;
         var centerY = rect.Value.CenterY;
-        if (!AtlasNodeInSafeViewport(centerX, centerY,
-                ctx.Snapshot.Window.Width, ctx.Snapshot.Window.Height))
+        if (_nodePanActive)
+            return TickPanAtlasNode(ctx, nodeName, uiIndex, centerX, centerY);
+        var guardianSheetNode = GuardianRotationPolicy.Maps.Contains(
+            nodeName, StringComparer.OrdinalIgnoreCase);
+        var nodeInViewport = guardianSheetNode
+            ? AtlasNodeInGuardianSheetViewport(centerX, centerY,
+                ctx.Snapshot.Window.Width, ctx.Snapshot.Window.Height)
+            : AtlasNodeInSafeViewport(centerX, centerY,
+                ctx.Snapshot.Window.Width, ctx.Snapshot.Window.Height);
+        if (!nodeInViewport)
             return TickPanAtlasNode(ctx, nodeName, uiIndex, centerX, centerY);
 
         _nodePanAnchorCandidate = 0;
@@ -540,9 +575,34 @@ public sealed class MapDeviceSystem
         {
             ctx.Input.HoverAt(x, y, CursorPriority.CombatAim);
             if ((BotMonotonicClock.Now - _nodeHoverStartedAt).TotalSeconds >= 2)
-                return Fail($"'{nodeName}' atlas child {uiIndex} is obscured or not hoverable; refusing click");
+            {
+                // The physical-device overlay or inventory can cover a geometrically valid
+                // node. Reposition the canvas and re-prove ownership instead of treating the
+                // first covered coordinate as terminal. TickPanAtlasNode still requires a
+                // hover-proven background drag anchor and remains bounded/fail-closed.
+                _nodeHoverUiIndex = -1;
+                _nodeHoverStartedAt = TimeSpan.MinValue;
+                Status = $"'{nodeName}' atlas child {uiIndex} is covered; repositioning canvas";
+                return TickPanAtlasNode(ctx, nodeName, uiIndex, centerX, centerY);
+            }
             Status = $"proving {nodeName} atlas child {uiIndex} is unobscured";
             return Result.InProgress;
+        }
+        if (guardianSheetNode)
+        {
+            var guardian = GuardianRotationPolicy.ClassifyTooltip(hover.TooltipLines);
+            if (!guardian.MapName.Equals(nodeName, StringComparison.OrdinalIgnoreCase))
+            {
+                if ((BotMonotonicClock.Now - _nodeHoverStartedAt).TotalSeconds >= 2)
+                {
+                    _nodeHoverUiIndex = -1;
+                    _nodeHoverStartedAt = TimeSpan.MinValue;
+                    Status = $"'{nodeName}' tooltip identity is covered; repositioning canvas";
+                    return TickPanAtlasNode(ctx, nodeName, uiIndex, centerX, centerY);
+                }
+                Status = $"proving {nodeName} guardian-sheet tooltip identity";
+                return Result.InProgress;
+            }
         }
 
         var ticket = ctx.Input.Click(
@@ -577,6 +637,7 @@ public sealed class MapDeviceSystem
     private Result TickPanAtlasNode(
         BehaviorContext ctx, string nodeName, int uiIndex, float centerX, float centerY)
     {
+        _nodePanActive = true;
         if (_nodePanAttempts >= MaxAtlasPanAttempts)
             return Fail($"failed to pan '{nodeName}' atlas child {uiIndex} into an unobstructed viewport");
 
@@ -584,7 +645,21 @@ public sealed class MapDeviceSystem
         if (_nodePanAnchorCandidate >= AtlasPanAnchors.Length)
             return Fail("no unobstructed atlas background point was available for panning");
 
-        var anchorRatio = AtlasPanAnchors[_nodePanAnchorCandidate];
+        var desiredX = window.Width * 0.42;
+        var desiredY = window.Height * 0.46;
+        var deltaX = Math.Clamp(desiredX - centerX, -window.Width * 0.18, window.Width * 0.18);
+        var deltaY = Math.Clamp(desiredY - centerY, -window.Height * 0.22, window.Height * 0.22);
+        var orderedAnchors = AtlasPanAnchors
+            .OrderBy(candidate =>
+            {
+                var sx = window.Width * candidate.X;
+                var sy = window.Height * candidate.Y;
+                var ex = Math.Clamp(sx + deltaX, window.Width * 0.22, window.Width * 0.60);
+                var ey = Math.Clamp(sy + deltaY, window.Height * 0.18, window.Height * 0.82);
+                return Math.Abs((ex - sx) - deltaX) + Math.Abs((ey - sy) - deltaY);
+            })
+            .ToArray();
+        var anchorRatio = orderedAnchors[_nodePanAnchorCandidate];
         var anchorX = (int)(window.Width * anchorRatio.X);
         var anchorY = (int)(window.Height * anchorRatio.Y);
         var (startX, startY) = window.ToScreen(anchorX, anchorY);
@@ -604,7 +679,7 @@ public sealed class MapDeviceSystem
 
         var hover = UiHoverView.Read(ctx.Snapshot.Reader, ctx.Snapshot.IngameStateAddress);
         var directChild = ctx.Snapshot.AtlasPanel.AtlasCanvasDirectChildForHover(hover.Element);
-        if (directChild < 0 || directChild >= CurrentAtlasNodeUiPrefix)
+        if (!IsSafeAtlasPanAnchor(directChild, hover.TooltipLines.Count))
         {
             _nodePanAnchorCandidate++;
             _nodePanHoverStartedAt = TimeSpan.MinValue;
@@ -612,10 +687,6 @@ public sealed class MapDeviceSystem
             return Result.InProgress;
         }
 
-        var desiredX = window.Width * 0.42;
-        var desiredY = window.Height * 0.46;
-        var deltaX = Math.Clamp(desiredX - centerX, -window.Width * 0.18, window.Width * 0.18);
-        var deltaY = Math.Clamp(desiredY - centerY, -window.Height * 0.22, window.Height * 0.22);
         var endRelX = Math.Clamp(anchorX + (int)deltaX, (int)(window.Width * 0.22), (int)(window.Width * 0.60));
         var endRelY = Math.Clamp(anchorY + (int)deltaY, (int)(window.Height * 0.18), (int)(window.Height * 0.82));
         var (endX, endY) = window.ToScreen(endRelX, endRelY);
@@ -636,6 +707,7 @@ public sealed class MapDeviceSystem
             _nodePanHoverStartedAt = TimeSpan.MinValue;
             _nodeHoverUiIndex = -1;
             _nodeHoverStartedAt = TimeSpan.MinValue;
+            _nodePanActive = false;
             Status = $"panning {nodeName} into safe atlas viewport ({_nodePanAttempts}/{MaxAtlasPanAttempts})";
             Diagnostics.EventLog.Emit(
                 "MapDevice", "map-device.atlas-pan-requested",
@@ -661,13 +733,31 @@ public sealed class MapDeviceSystem
         && centerY >= windowHeight * 0.14
         && centerY <= windowHeight * 0.82;
 
+    internal static bool IsSafeAtlasPanAnchor(int directCanvasChild, int tooltipLineCount)
+        => directCanvasChild >= 0
+           || (directCanvasChild == -1 && tooltipLineCount == 0);
+
+    /// <summary>The Shaper Guardian nodes are on PoE's fixed right-hand special-map sheet,
+    /// outside the pannable central-atlas bounds. Exact hover ancestry and tooltip identity
+    /// remain mandatory before a node is read or clicked.</summary>
+    internal static bool AtlasNodeInGuardianSheetViewport(
+        float centerX, float centerY, int windowWidth, int windowHeight)
+        => windowWidth > 0 && windowHeight > 0
+        && centerY >= windowHeight * 0.16
+        && centerY <= windowHeight * 0.84
+        && (centerX >= windowWidth * 0.70 && centerX <= windowWidth * 0.96
+            // Physical Map Device opens player inventory on the right and shifts the
+            // immutable Guardian sheet into the center-left space beside it.
+            || centerX >= windowWidth * 0.36 && centerX <= windowWidth * 0.65);
+
     /// <summary>Verify the selected node matches the recipe — only enforced when a scarab loadout
     /// is required (the stacked-deck safety check; general mapping carries no scarab recipe).</summary>
     private bool TargetMapSelected(
         BehaviorContext ctx, AtlasPanelView atlas, out string error)
     {
         error = string.Empty;
-        if (_payloadSource is not (PayloadSource.AtlasStorage or PayloadSource.InventoryNormalMap))
+        if (_payloadSource is not (PayloadSource.AtlasStorage
+            or PayloadSource.InventoryNormalMap or PayloadSource.InventoryGuardianMap))
             return true;
         if (ctx.Strategy is null)
         {
@@ -790,6 +880,8 @@ public sealed class MapDeviceSystem
         if (atlas.IsDevicePanelVisible() && atlas.DeviceSlot(0) is { IsOccupied: true })
         {
             if (!TargetMapSelected(ctx, atlas, out var stagedError)) return Fail(stagedError);
+            if (!StackedDeckScarabLoadoutReady(ctx, atlas, out var loadoutError))
+                return Fail(loadoutError);
             return Advance(Phase.Activate, "carried normal map staged - settling activate button");
         }
 
@@ -858,6 +950,75 @@ public sealed class MapDeviceSystem
                     ["quality"] = carried.Quality,
                     ["eligibleCount"] = eligible.Length,
                 });
+        }
+        return Result.InProgress;
+    }
+
+    /// <summary>
+    /// Stages one pre-inspected generic Shaper Guardian key under the positively selected
+    /// Guardian Atlas node. The key itself has no Phoenix/Minotaur/Chimera/Hydra identity;
+    /// the selected node supplies it, so node verification happens before and after staging.
+    /// </summary>
+    private Result TickSelectCarriedGuardianMap(BehaviorContext ctx)
+    {
+        const string guardianPath = "Metadata/Items/Maps/MapKeyShaperGuardian";
+        var atlas = ctx.Snapshot.AtlasPanel;
+        if (!atlas.IsVisible)
+            return Fail("atlas panel closed unexpectedly during Guardian-map insert");
+        if (atlas.IsDevicePanelVisible() && atlas.DeviceSlot(0) is { IsOccupied: true })
+        {
+            if (!TargetMapSelected(ctx, atlas, out var stagedError)) return Fail(stagedError);
+            if (ctx.Snapshot.Inventory.IsOpen)
+            {
+                var close = ctx.Input.VerifiedTapKey(
+                    VK_INVENTORY, ClickIntent.InteractUi,
+                    "close inventory after staging Guardian map",
+                    expectResolved: () => !(_getSnapshot()?.Inventory.IsOpen ?? true),
+                    timeoutMs: 1500);
+                if (close.Accepted) Status = "closing inventory before Guardian-map activation";
+                return Result.InProgress;
+            }
+            return Advance(Phase.Activate, "Guardian map staged - settling activate button");
+        }
+
+        if (!atlas.IsDevicePanelVisible()) return TickSelectAtlasNode(ctx);
+        if (!TargetMapSelected(ctx, atlas, out _)) return TickSelectAtlasNode(ctx);
+        if ((BotMonotonicClock.Now - _lastActionAt).TotalMilliseconds < InsertSettleMs)
+            return Result.InProgress;
+
+        var inventory = ctx.Snapshot.Inventory;
+        if (!inventory.IsOpen)
+        {
+            ctx.Input.VerifiedTapKey(
+                VK_INVENTORY, ClickIntent.InteractUi, "open inventory for Guardian map",
+                expectResolved: () => _getSnapshot()?.Inventory.IsOpen ?? false,
+                timeoutMs: 1500);
+            Status = "opening inventory for Guardian map";
+            return Result.InProgress;
+        }
+
+        var carried = inventory.Items
+            .Where(item => item.Path.Equals(guardianPath, StringComparison.OrdinalIgnoreCase)
+                && item.Rect is not null && item.Identified
+                && item.Rarity is EntityListReader.EntityRarity.Normal or EntityListReader.EntityRarity.Rare)
+            .OrderBy(item => item.Rect!.Value.Y)
+            .ThenBy(item => item.Rect!.Value.X)
+            .FirstOrDefault();
+        if (carried.ItemEntity == 0 || carried.Rect is not { } rect)
+            return Fail("no identified Normal/Rare Shaper Guardian key is visible in inventory");
+        if (_clickAttempts >= MaxClickAttempts)
+            return Fail("failed to stage carried Shaper Guardian key");
+
+        var (x, y) = ctx.Snapshot.Window.ToScreen((int)rect.CenterX, (int)rect.CenterY);
+        var ticket = ctx.Input.ModifierClick(
+            x, y, [VK_LCONTROL], ClickIntent.InteractUi, "insert carried Shaper Guardian key",
+            expectResolved: () => _getSnapshot()?.AtlasPanel.DeviceSlot(0) is { IsOccupied: true },
+            timeoutMs: 2500);
+        if (ticket.Accepted)
+        {
+            _clickAttempts++;
+            _lastActionAt = BotMonotonicClock.Now;
+            Status = $"staging Guardian key ({_clickAttempts}/{MaxClickAttempts})";
         }
         return Result.InProgress;
     }
@@ -982,7 +1143,8 @@ public sealed class MapDeviceSystem
     {
         var atlas = ctx.Snapshot.AtlasPanel;
 
-        if (_payloadSource == PayloadSource.AtlasStorage
+        if (_payloadSource is PayloadSource.AtlasStorage or PayloadSource.InventoryNormalMap
+            or PayloadSource.InventoryGuardianMap
             && atlas.IsVisible && atlas.IsDevicePanelVisible())
         {
             if (!TargetMapSelected(ctx, atlas, out var selectionError))
@@ -1156,6 +1318,8 @@ public sealed class MapDeviceSystem
         // fallback for the brief frame before the label enters the snapshot.
         var clickPoint = ResolvePortalClickPoint(ctx, portal);
         if (clickPoint is null) { Status = "no portal click point"; return Result.InProgress; }
+        if (_clickAttempts >= MaxPortalClickAttempts)
+            return Fail($"failed to enter map after {MaxPortalClickAttempts} portal-label clicks");
 
         var startAreaHash = ctx.Snapshot.AreaHash;
         var ticket = ctx.Input.Click(clickPoint.Value.X, clickPoint.Value.Y,
@@ -1275,6 +1439,18 @@ public sealed class MapDeviceSystem
             && candidate.IsLabelVisible
             && candidate.IsRectOnScreen
             && candidate.LabelRect is not null);
+        // Multiplex portals expose their clickable label through a small backing entity
+        // whose ID can differ from the portal entity in the world cache. When exact ID
+        // ownership is unavailable, bind by portal metadata plus tight grid proximity.
+        label ??= ctx.Snapshot.GroundLabels
+            .Where(candidate => candidate.IsLabelVisible
+                && candidate.IsRectOnScreen
+                && candidate.LabelRect is not null
+                && candidate.Path.Contains("Portal", StringComparison.OrdinalIgnoreCase)
+                && candidate.EntityGridPosition is not null)
+            .OrderBy(candidate => Distance(candidate.EntityGridPosition!.Value, portal.GridPosition))
+            .FirstOrDefault(candidate =>
+                Distance(candidate.EntityGridPosition!.Value, portal.GridPosition) <= 8f);
         if (label?.LabelRect is { } rect)
         {
             var (sx, sy) = ctx.Snapshot.Window.ToScreen(
@@ -1372,5 +1548,5 @@ public static class MapDeviceAccessPolicy
 public static class MapPortalEntryPolicy
 {
     public static float ClickRange(float interactionRange)
-        => Math.Clamp(interactionRange + 12f, interactionRange, 45f);
+        => Math.Min(interactionRange + 12f, 45f);
 }

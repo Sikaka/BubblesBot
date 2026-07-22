@@ -4,6 +4,20 @@ namespace BubblesBot.Tests;
 
 public sealed class EntityDispositionCatalogTests
 {
+    [Fact]
+    public void MavenMapVolatileOrbIsHazardBeforeWitnessRule()
+        => Assert.Equal(
+            EntityDisposition.Hazard,
+            EntityDispositionCatalog.Classify(
+                "Metadata/Monsters/MavenBoss/TheMavenMapVolatileOrb"));
+
+    [Fact]
+    public void WitnessingMavenRemainsIgnored()
+        => Assert.Equal(
+            EntityDisposition.Ignore,
+            EntityDispositionCatalog.Classify(
+                "Metadata/Monsters/MavenBoss/TheMavenMap"));
+
     [Theory]
     [InlineData("Metadata/Monsters/InvisibleFire/AfflictionBossFinalDeathZone@75")]
     [InlineData("Metadata/Monsters/LeagueAffliction/Demons/FinalBossDeathZones/LightningVolatileObject")]

@@ -14,6 +14,13 @@ public static class MapZoneCompletionPolicy
            && (!bossRequired || bossComplete)
            && deliriumSettled;
 
+    /// <summary>Stable whole-map objectives do not need the generic five-second frontier
+    /// debounce. A separate boss arena is the sole exception: finish its local loot and take
+    /// its exit first, then complete immediately in the parent map.</summary>
+    public static bool ShouldCompleteImmediately(
+        bool canCompleteMap, bool hasSeparateBossArena, bool arenaEntered)
+        => canCompleteMap && (!hasSeparateBossArena || !arenaEntered);
+
     /// <summary>Once most of a separate-arena map has been swept, remaining coverage is no
     /// longer the objective: preserve outward progress until the boss door is discovered.</summary>
     public static bool ShouldPrioritizeBossArena(
@@ -24,6 +31,23 @@ public static class MapZoneCompletionPolicy
            && hasSeparateArena
            && !arenaEntered
            && revealPercent >= BossHuntRevealPercent;
+
+    /// <summary>The configured reveal cutoff may finish ordinary coverage, but it must not
+    /// strand a required separate-arena boss behind an undiscovered door. Keep exploring until
+    /// a valid door is visible or the connected terrain is genuinely exhausted.</summary>
+    public static bool ShouldContinueBossDiscovery(
+        bool bossRequired,
+        bool bossComplete,
+        bool hasSeparateArena,
+        bool arenaEntered,
+        bool explorationExhausted,
+        bool eligibleTransitionVisible)
+        => bossRequired
+           && !bossComplete
+           && hasSeparateArena
+           && !arenaEntered
+           && !explorationExhausted
+           && !eligibleTransitionVisible;
 
     /// <summary>Once every required boss in a separate arena is dead, return to the parent
     /// map immediately. Local loot/mechanic branches still run before this policy branch.</summary>
@@ -39,5 +63,12 @@ public static class MapZoneCompletionPolicy
     public static bool ShouldAbandonExhaustedArenaSearch(
         int attempts, int maxAttempts, bool bossComplete)
         => !bossComplete && maxAttempts > 0 && attempts >= maxAttempts;
+
+    /// <summary>Boss death evidence intentionally settles for several seconds. During that
+    /// quiet gate, a fully observed dead roster must wait rather than launching the missing-boss
+    /// arena search and exhausting its bounded route attempts before certification completes.</summary>
+    public static bool ShouldSearchArenaForMissingBoss(
+        bool bossComplete, int bossesDead, int expectedBosses)
+        => !bossComplete && (expectedBosses <= 0 || bossesDead < expectedBosses);
 
 }

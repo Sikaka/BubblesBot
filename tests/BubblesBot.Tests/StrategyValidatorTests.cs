@@ -66,6 +66,21 @@ public sealed class StrategyValidatorTests
     }
 
     [Fact]
+    public void SeparateArenaWarnsWhenPortalReserveCannotCoverCheckpointAndExit()
+    {
+        var strategy = Valid();
+        strategy.Supply.Map.TargetMapName = "Strand";
+        strategy.MapPrep.AtlasNodeName = "Strand";
+        strategy.Completion.RequireBossKill = true;
+        strategy.Supply.CurrencyReserves.Single(reserve =>
+            reserve.Item.Equals("PortalScroll", StringComparison.OrdinalIgnoreCase)).MinCount = 1;
+
+        var result = StrategyValidator.Validate(strategy);
+        Assert.True(result.Ok);
+        Assert.Contains(result.Warnings, warning => warning.Contains("at least 2"));
+    }
+
+    [Fact]
     public void RequireBossKillIsRejectedWithoutCataloguedRoster()
     {
         var strategy = Valid();
@@ -156,6 +171,28 @@ public sealed class StrategyValidatorTests
         var strategy = Valid();
         strategy.Supply.Map.Source = MapSource.StashTab;
         Assert.False(StrategyValidator.Validate(strategy).Ok);
+    }
+
+    [Fact]
+    public void Scoured_policy_is_executable_for_verified_inventory_maps()
+    {
+        var strategy = Valid();
+        strategy.Supply.Map.Source = MapSource.PlayerInventory;
+        strategy.MapPrep.Rolling.Mode = MapRollingMode.Scoured;
+        Assert.True(StrategyValidator.Validate(strategy).Ok);
+    }
+
+    [Theory]
+    [InlineData(MapRollingMode.Rare)]
+    [InlineData(MapRollingMode.RareCorrupted)]
+    public void Currency_rolling_modes_fail_closed_until_executor_is_live_proven(MapRollingMode mode)
+    {
+        var strategy = Valid();
+        strategy.Supply.Map.Source = MapSource.PlayerInventory;
+        strategy.MapPrep.Rolling.Mode = mode;
+        strategy.MapPrep.Rolling.RejectedStatIds.Add(1234);
+        var result = StrategyValidator.Validate(strategy);
+        Assert.Contains(result.Errors, error => error.Contains("not executable"));
     }
 
     [Fact]

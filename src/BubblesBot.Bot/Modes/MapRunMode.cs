@@ -1,4 +1,5 @@
 using BubblesBot.Bot.Behaviors;
+using BubblesBot.Bot.Behaviors.Interact;
 using BubblesBot.Bot.Input;
 using BubblesBot.Bot.Settings;
 using BubblesBot.Bot.Strategies;
@@ -41,7 +42,8 @@ public enum MapRunPhase
 /// </summary>
 public sealed class MapRunMode : IBotMode
 {
-    private enum Step { Boot, Hideout, EnterMapWait, Map, LeaveWait, Report }
+    private enum Step { Boot, Hideout, EnterMapWait, Map, Recover, LeaveWait, Report }
+    private enum RecoveryLeg { None, AwaitSafeHub, ReturnToMap }
 
     private readonly SettingsStore        _settings;
     private readonly StrategyStore        _strategies;
@@ -57,6 +59,7 @@ public sealed class MapRunMode : IBotMode
     private float _lootChaosAtMapStart;
     private int _pickupsAtMapStart;
     private int _mapIndex;
+    private bool _mapReportEmitted;
     private bool _abandoningMap;
     private string _abandonReason = "";
 
@@ -69,11 +72,13 @@ public sealed class MapRunMode : IBotMode
 
     private readonly MovementSystem    _movement;
     private readonly SkillBook         _skills;
+    private readonly InteractSystem    _interact = new();
     private readonly MapDeviceSystem   _mapDevice;
     private readonly LeaveMapSystem    _leaveMap;
     private readonly StashDepositSystem _stashDeposit;
     private readonly StashTabSwitcher  _supplyTabSwitcher;
     private readonly PushCombatMode    _mapFarming;
+    private readonly EnterAreaTransition _returnThroughCheckpoint;
     private readonly AreaTransitionTracker _entryTransition = new(TimeSpan.FromSeconds(8));
 
     private Step     _step = Step.Boot;
@@ -86,6 +91,10 @@ public sealed class MapRunMode : IBotMode
     private int _supplyTierClickAttempts;
     private TimeSpan _supplyTabObservedAt = TimeSpan.MinValue;
     private TimeSpan _lastSupplyActionAt = TimeSpan.MinValue;
+    private RecoveryLeg _recoveryLeg;
+    private TimeSpan _recoveryStartedAt = TimeSpan.MinValue;
+    private uint _recoveryOriginAreaHash;
+    private int _mapDeaths;
 
     // Cross-run telemetry / counters (survive area changes).
     private int      _mapsCompleted;
@@ -153,9 +162,59 @@ public sealed class MapRunMode : IBotMode
         _supplyTabSwitcher = new StashTabSwitcher(getSnapshot);
         _mapFarming  = new PushCombatMode(settings, coord, getSnapshot, getLive, getEntities,
             orchestrated: true, getStrategy: () => _activeStrategy);
+        _returnThroughCheckpoint = new EnterAreaTransition(
+            "return through boss checkpoint portal", _interact, _movement, _skills,
+            getSnapshot,
+            entity => entity.Kind is EntityListReader.EntityKind.TownPortal
+                or EntityListReader.EntityKind.Portal);
     }
 
     public void Reset() => ResetRun();
+
+    /// <summary>
+    /// Called by the global revive gate on confirmed resurrection. A positively confirmed
+    /// pre-boss portal keeps this map armed and enters recovery; false preserves the global
+    /// fail-safe stop for deaths without a usable checkpoint.
+    /// </summary>
+    public bool NotifyRevived()
+    {
+        if (_stopped || _step != Step.Map || !_mapFarming.PrepareForBossCheckpointRecovery())
+            return false;
+
+        _mapDeaths++;
+        _recoveryLeg = RecoveryLeg.AwaitSafeHub;
+        _recoveryStartedAt = BotMonotonicClock.Now;
+        _recoveryOriginAreaHash = _lastAreaHash;
+        _returnThroughCheckpoint.Reset();
+        _step = Step.Recover;
+        _lifecyclePhase = MapRunPhase.Entry;
+        _phase = $"death {_mapDeaths}: awaiting hideout, then boss checkpoint re-entry";
+        Diagnostics.EventLog.Emit(
+            "maprun", "maprun.boss-checkpoint-recovery-started",
+            Diagnostics.EventSeverity.Warning, _phase,
+            new Dictionary<string, object?>
+            {
+                ["deaths"] = _mapDeaths,
+                ["originAreaHash"] = $"0x{_recoveryOriginAreaHash:X8}",
+            });
+        return true;
+    }
+
+    public void NotifyDeath()
+    {
+        if (!_stopped)
+        {
+            _mapDeaths++;
+            Stop("player died", "died");
+        }
+    }
+
+    /// <summary>Called on the tick-thread when an armed mapping run is manually disarmed.</summary>
+    public void NotifyDisarmed()
+    {
+        if (!_stopped)
+            Stop("automation manually disarmed", "disarmed");
+    }
 
     public void Tick(GameSnapshot snapshot, IInputRouter input)
     {
@@ -206,6 +265,7 @@ public sealed class MapRunMode : IBotMode
             case Step.Hideout:      TickHideout(ctx); break;
             case Step.EnterMapWait: TickEnterMapWait(ctx); break;
             case Step.Map:          TickMap(snapshot, input, ctx); break;
+            case Step.Recover:      TickRecovery(ctx); break;
             case Step.LeaveWait:    TickLeave(ctx); break;
             case Step.Report:       TickReport(); break;
         }
@@ -601,6 +661,68 @@ public sealed class MapRunMode : IBotMode
         }
     }
 
+    private void TickRecovery(BehaviorContext ctx)
+    {
+        _lifecyclePhase = MapRunPhase.Entry;
+        if (_recoveryStartedAt != TimeSpan.MinValue
+            && BotMonotonicClock.Now - _recoveryStartedAt > TimeSpan.FromSeconds(30))
+        {
+            Stop($"boss checkpoint recovery timed out during {_recoveryLeg}", "died");
+            return;
+        }
+
+        if (_recoveryLeg == RecoveryLeg.AwaitSafeHub)
+        {
+            if (!IsHideout(ctx))
+            {
+                _phase = $"death {_mapDeaths}: waiting for checkpoint resurrection destination";
+                return;
+            }
+
+            _recoveryLeg = RecoveryLeg.ReturnToMap;
+            _recoveryStartedAt = BotMonotonicClock.Now;
+            _returnThroughCheckpoint.Reset();
+            _phase = $"death {_mapDeaths}: hideout confirmed; locating existing map portal";
+            Diagnostics.EventLog.Emit(
+                "maprun", "maprun.boss-checkpoint-hideout-confirmed",
+                Diagnostics.EventSeverity.Info, _phase);
+            return;
+        }
+
+        if (_recoveryLeg != RecoveryLeg.ReturnToMap)
+        {
+            Stop("boss checkpoint recovery entered an invalid state", "died");
+            return;
+        }
+
+        var result = _returnThroughCheckpoint.Tick(ctx);
+        _phase = $"death {_mapDeaths}: entering existing boss checkpoint portal";
+        if (result != BehaviorStatus.Success) return;
+
+        if (IsHideout(ctx))
+        {
+            // EnterAreaTransition normally reports Success only after the area hash changes.
+            // Keep this fail-closed guard in case a same-area displacement is ever observed.
+            _phase = $"death {_mapDeaths}: portal clicked; awaiting map load";
+            return;
+        }
+
+        _returnThroughCheckpoint.Reset();
+        _recoveryLeg = RecoveryLeg.None;
+        _recoveryStartedAt = TimeSpan.MinValue;
+        _step = Step.Map;
+        _lifecyclePhase = MapRunPhase.BossMechanics;
+        _phase = $"death {_mapDeaths}: boss checkpoint re-entered; resuming objectives";
+        Diagnostics.EventLog.Emit(
+            "maprun", "maprun.boss-checkpoint-recovery-completed",
+            Diagnostics.EventSeverity.Info, _phase,
+            new Dictionary<string, object?>
+            {
+                ["deaths"] = _mapDeaths,
+                ["areaHash"] = $"0x{ctx.Snapshot.AreaHash:X8}",
+            });
+    }
+
     private void TickLeave(BehaviorContext ctx)
     {
         _lifecyclePhase = MapRunPhase.Exit;
@@ -658,6 +780,12 @@ public sealed class MapRunMode : IBotMode
                 // IsCleared until its reachable zone graph is exhausted. Never credit here.
                 _phase = "map subzone changed - continuing clear";
                 break;
+            case Step.Recover:
+                // Death recovery deliberately crosses map -> hideout -> the same map instance.
+                // Its portal behavior owns verification; resetting here would erase the click
+                // latch and the preserved boss/Delirium controller state.
+                _phase = $"boss checkpoint recovery area change during {_recoveryLeg}";
+                break;
             default:
                 ResetSubsystems();
                 _step = Step.Boot;
@@ -682,6 +810,11 @@ public sealed class MapRunMode : IBotMode
         _abandoningMap = false;
         _abandonReason = "";
         _mapIndex++;
+        _mapReportEmitted = false;
+        _mapDeaths = 0;
+        _recoveryLeg = RecoveryLeg.None;
+        _recoveryStartedAt = TimeSpan.MinValue;
+        _recoveryOriginAreaHash = 0;
         try
         {
             var loot = _getLoot();
@@ -716,6 +849,9 @@ public sealed class MapRunMode : IBotMode
     /// <summary>Emit a run report for the just-finished map. Never throws into the tick loop.</summary>
     private void EmitReport(string result, string stopReason)
     {
+        if (_mapReportEmitted || _mapIndex <= 0 || _mapStartedAt == TimeSpan.Zero)
+            return;
+
         try
         {
             var loot = _getLoot();
@@ -742,7 +878,8 @@ public sealed class MapRunMode : IBotMode
                 LootChaosCumulative: loot.TotalChaos,
                 ChaosPerHour: loot.ChaosPerHour,
                 ItemsPicked: Math.Max(0, loot.Pickups - _pickupsAtMapStart),
-                Deaths: result == "died" ? 1 : 0));
+                Deaths: _mapDeaths));
+            _mapReportEmitted = true;
         }
         catch (Exception ex)
         {
@@ -756,6 +893,8 @@ public sealed class MapRunMode : IBotMode
         _movement.Release();
         _mapDevice.Cancel();
         _leaveMap.Cancel();
+        _returnThroughCheckpoint.Reset();
+        _interact.Cancel();
         _stashDeposit.Cancel();
         _supplyTabSwitcher.Reset();
         _supplyClickAttempts = 0;
@@ -764,6 +903,9 @@ public sealed class MapRunMode : IBotMode
         _supplyTabObservedAt = TimeSpan.MinValue;
         _lastSupplyActionAt = TimeSpan.MinValue;
         _mapFarming.Reset();
+        _recoveryLeg = RecoveryLeg.None;
+        _recoveryStartedAt = TimeSpan.MinValue;
+        _recoveryOriginAreaHash = 0;
     }
 
     private void ResetRun()
@@ -778,6 +920,8 @@ public sealed class MapRunMode : IBotMode
         _itemsStashed = 0;
         _portalScrollsRemaining = 0;
         _mapStartedAt = TimeSpan.Zero;
+        _mapDeaths = 0;
+        _mapReportEmitted = false;
         _abandoningMap = false;
         _abandonReason = "";
         _stopped = false;
@@ -788,12 +932,13 @@ public sealed class MapRunMode : IBotMode
         _entryTransition.Reset();
     }
 
-    private void Stop(string reason)
+    private void Stop(string reason, string? reportResult = null)
     {
         // A map in progress ended abnormally (death, stuck, device failure) — capture it. Clean
         // stops in hideout (target reached, no strategy) already reported per map via CreditMap.
-        if (_step is Step.Map or Step.LeaveWait)
-            EmitReport(reason.Contains("died", StringComparison.OrdinalIgnoreCase) ? "died" : "stopped", reason);
+        if (_step is Step.Map or Step.Recover or Step.LeaveWait)
+            EmitReport(reportResult
+                ?? (reason.Contains("died", StringComparison.OrdinalIgnoreCase) ? "died" : "stopped"), reason);
 
         _stopped = true;
         _stopReason = reason;

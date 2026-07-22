@@ -129,6 +129,20 @@ public sealed class SkillSlot
     /// node, via the cursor arbiter, instead of the Walk key. Default false = stationary channel.
     /// </summary>
     public bool IsMovementChannel { get; set; }
+
+    /// <summary>
+    /// SelfBuff only: internal player-buff id produced by this skill (for example
+    /// <c>blood_rage</c>). When set, maintenance casts only while the buff is absent instead of
+    /// blindly recasting at <see cref="MinCastIntervalMs"/>.
+    /// </summary>
+    public string MaintainedBuffName { get; set; } = "";
+
+    /// <summary>
+    /// SelfBuff only: do not activate the skill unless a hostile is nearby. This is on by
+    /// default because degen buffs such as Blood Rage should never be started in the hideout or
+    /// during empty traversal.
+    /// </summary>
+    public bool RequireNearbyEnemy { get; set; } = true;
 }
 
 /// <summary>

@@ -50,6 +50,26 @@ public sealed class MapInventoryPolicyTests
         Assert.True(MapInventoryPolicy.ShouldRetainForNextRun(items, items[2], strategy));
     }
 
+    [Fact]
+    public void Retains_every_scarab_declared_by_the_active_strategy()
+    {
+        var strategy = new FarmingStrategy();
+        strategy.Supply.Scarabs.Add(new ScarabLine
+        {
+            PathFragment = "ScarabBreachOfSplintering",
+            DisplayName = "Breach Scarab of Splintering",
+            CountPerMap = 1,
+        });
+        InventoryView.Item[] items =
+        [
+            Item(10, "Metadata/Items/Scarabs/ScarabBreachOfSplintering", 4),
+            Item(20, "Metadata/Items/Scarabs/ScarabAmbush", 4),
+        ];
+
+        Assert.True(MapInventoryPolicy.ShouldRetainForNextRun(items, items[0], strategy));
+        Assert.False(MapInventoryPolicy.ShouldRetainForNextRun(items, items[1], strategy));
+    }
+
     private static InventoryView.Item Item(long entity, string path, int stack)
         => new(0, (nint)entity, null, path, stack, 1, 1);
 }

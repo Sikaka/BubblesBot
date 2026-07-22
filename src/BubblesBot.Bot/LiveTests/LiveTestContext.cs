@@ -9,7 +9,7 @@ namespace BubblesBot.Bot.LiveTests;
 public sealed class LiveTestContext
 {
     private readonly MemoryReader _reader;
-    private readonly nint _ingameStateAddress;
+    private nint _ingameStateAddress;
     private readonly nint _gameWindow;
     private readonly GameStateView _gameState;
     private readonly LiveTestOptions _options;
@@ -288,6 +288,14 @@ public sealed class LiveTestContext
 
     private void RefreshIngameData()
     {
+        // IngameState is destroyed and recreated across area loads. Long-running read-only
+        // captures (for example an encounter entered from a hideout portal) must follow the
+        // live state pointer instead of continuing to read the startup instance.
+        if (_gameState.ReadKind() == GameStateKind.InGame
+            && _gameState.CurrentStatePointer is { } liveState
+            && liveState != 0)
+            _ingameStateAddress = liveState;
+
         if (_reader.TryReadStruct<nint>(_ingameStateAddress + KnownOffsets.IngameState.Data, out var liveData)
             && liveData != 0)
             IngameDataAddress = liveData;

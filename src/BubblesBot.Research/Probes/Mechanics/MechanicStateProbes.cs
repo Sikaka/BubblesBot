@@ -712,6 +712,16 @@ internal static class MechanicStateCapture
                     : "?";
                 componentEvidence += $" chest=0x{(long)chest:X} opened={opened} locked={locked} strongbox={strongbox}";
             }
+            if (snapshot.Components.TryGetValue("AreaTransition", out var areaTransition)
+                && areaTransition != 0)
+            {
+                componentEvidence += AreaTransitionIdentityReader.TryRead(
+                    ctx.Reader, areaTransition, out var transitionIdentity)
+                    ? $" areaTransition=0x{(long)areaTransition:X} areaId={transitionIdentity.AreaId} "
+                      + $"type={transitionIdentity.Type} destinationId='{transitionIdentity.DestinationAreaId}' "
+                      + $"destinationName='{transitionIdentity.DestinationAreaName}'"
+                    : $" areaTransition=0x{(long)areaTransition:X} identity=unreadable";
+            }
             if (snapshot.Path.Contains("Objects/Afflictionator", StringComparison.OrdinalIgnoreCase)
                 && ctx.Oracle.IsAvailable)
             {

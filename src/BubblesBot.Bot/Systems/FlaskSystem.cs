@@ -52,6 +52,8 @@ public sealed class FlaskSystem
         var manaFrac = live.ManaMax > 0 ? (float)live.ManaCurrent / live.ManaMax : 1f;
         var lifeT = s.AutoLifeThresholdPct / 100f;
         var manaT = s.AutoManaThresholdPct / 100f;
+        var utilityWindow = !s.AutoUtilityOnlyInCombat
+            || Threat.Nearest(ctx, s.CombatEngageRange) is not null;
 
         var fired = false;
         foreach (var slot in _belt)
@@ -66,7 +68,10 @@ public sealed class FlaskSystem
                 case FlaskKind.Life:    want = hpFrac   < lifeT; break;
                 case FlaskKind.Mana:    want = manaFrac < manaT; break;
                 case FlaskKind.Hybrid:  want = hpFrac < lifeT || manaFrac < manaT; break;
-                case FlaskKind.Utility: want = s.AutoUseUtilityFlasks; cooldown = s.AutoUtilityIntervalMs; break;
+                case FlaskKind.Utility:
+                    want = s.AutoUseUtilityFlasks && utilityWindow;
+                    cooldown = s.AutoUtilityIntervalMs;
+                    break;
                 default: continue; // Empty
             }
             if (!want) continue;

@@ -76,18 +76,26 @@ public static class Threat
     /// <summary>Nearest valid hostile within <paramref name="radius"/> — the swarm/danger check.
     /// Optional <paramref name="skip"/> mirrors <see cref="Biggest"/>: ids the caller has
     /// decided are un-engageable right now (damage-gated, essence-frozen).</summary>
-    public static EntityCache.Entry? Nearest(BehaviorContext ctx, float radius, Func<uint, bool>? skip = null)
+    public static EntityCache.Entry? Nearest(
+        BehaviorContext ctx, float radius, Func<uint, bool>? skip = null,
+        bool requireLos = false)
     {
         if (ctx.Entities is null || ctx.Live is null) return null;
         var p = ctx.Live.Value.GridPosition;
         var r2 = radius * radius;
         EntityCache.Entry? best = null;
         var bestD2 = float.PositiveInfinity;
+        ICellReader? pf = requireLos && ctx.Snapshot.Nav is { IsAvailable: true } nav
+            ? nav.PathReader
+            : null;
         foreach (var e in ctx.Entities.Entries.Values)
         {
             if (!Valid(e)) continue;
             if (skip is not null && skip(e.Id)) continue;
             var d2 = Dist2(e.GridPosition, p);
+            if (pf is not null && !PathSmoother.HasLineOfSight(
+                    pf, p.X, p.Y, e.GridPosition.X, e.GridPosition.Y, minValue: 1))
+                continue;
             if (d2 <= r2 && d2 < bestD2) { bestD2 = d2; best = e; }
         }
         return best;

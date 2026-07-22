@@ -64,6 +64,8 @@ public sealed class ExplorationSystem
     private TimeSpan _lastExhaustLog; // throttle for the exhausted event
     private HashSet<long>? _walkableQuanta;               // all quanta containing walkable cells; lazy per area
     private uint _walkableQuantaArea;
+    private HashSet<long>? _connectedWalkableQuanta;
+    private long _connectedWalkableRoot;
     // Cells the last DRY BFS flood actually reached — the player's walkable-connected
     // region. Beacon candidates outside it are unreachable (across a gap, separate blob)
     // and would wedge FollowPath in permanent 'no path'.
@@ -73,6 +75,9 @@ public sealed class ExplorationSystem
     private double _headingY;
     private Vector2i _waveOrigin;
     private float _maximumWaveRadius;
+    private uint _farthestArea;
+    private Vector2i _farthestOrigin;
+    private Vector2i? _farthestConnectedPoint;
 
     /// <param name="revealRadiusGrid">
     /// Radius stamped as explored around the player. Mapping should keep the default network-
@@ -394,12 +399,110 @@ public sealed class ExplorationSystem
                         set.Add(Pack(x / VisitedQuantum, y / VisitedQuantum));
             _walkableQuanta = set;
             _walkableQuantaArea = ctx.Snapshot.AreaHash;
+            _connectedWalkableQuanta = null;
+            _connectedWalkableRoot = 0;
+        }
+
+        // The raw terrain buffer can contain disconnected islands, boss arenas, and padding.
+        // Exploration only routes within the player's connected component, so the progress
+        // denominator must use the same scope or a fully swept map can misleadingly read low.
+        var player = ctx.Live?.GridPosition;
+        if (player is null) return (0, 0);
+        var rootX = player.Value.X / VisitedQuantum;
+        var rootY = player.Value.Y / VisitedQuantum;
+        var root = Pack(rootX, rootY);
+        if (!_walkableQuanta.Contains(root)
+            && pf.Read(player.Value.X, player.Value.Y) > 0)
+            _walkableQuanta.Add(root);
+        if (_connectedWalkableQuanta is null
+            || _connectedWalkableRoot != root
+            && !_connectedWalkableQuanta.Contains(root))
+        {
+            _connectedWalkableQuanta = ConnectedComponent(_walkableQuanta, rootX, rootY);
+            _connectedWalkableRoot = root;
         }
 
         var revealed = 0;
         foreach (var q in _visited)
-            if (_walkableQuanta.Contains(q)) revealed++;
-        return (revealed, _walkableQuanta.Count);
+            if (_connectedWalkableQuanta.Contains(q)) revealed++;
+        return (revealed, _connectedWalkableQuanta.Count);
+    }
+
+    /// <summary>
+    /// Returns the most distant walkable point in the navigation component containing
+    /// <paramref name="origin"/>. This is deliberately independent of reveal state: the
+    /// network bubble can mark a terminal corridor as explored before the character has
+    /// physically reached its arena entrance.
+    /// </summary>
+    public Vector2i? FarthestConnectedPoint(BehaviorContext ctx, Vector2i origin)
+    {
+        var nav = ctx.Snapshot.Nav;
+        if (!nav.IsAvailable || nav.PathReader is not { } pf) return null;
+        if (_farthestArea == ctx.Snapshot.AreaHash
+            && _farthestOrigin.X == origin.X && _farthestOrigin.Y == origin.Y)
+            return _farthestConnectedPoint;
+
+        EnsureWalkableQuanta(ctx, pf);
+        if (_walkableQuanta is null || _walkableQuanta.Count == 0) return null;
+
+        var rootX = origin.X / VisitedQuantum;
+        var rootY = origin.Y / VisitedQuantum;
+        var root = Pack(rootX, rootY);
+        if (!_walkableQuanta.Contains(root))
+        {
+            // Spawn coordinates can land on a dynamic object cell. Use the nearest terrain
+            // quantum, but never jump to an arbitrary disconnected island.
+            var nearby = _walkableQuanta
+                .Select(key => Unpack(key))
+                .Where(q => Math.Abs(q.X - rootX) <= 2 && Math.Abs(q.Y - rootY) <= 2)
+                .OrderBy(q => (q.X - rootX) * (q.X - rootX) + (q.Y - rootY) * (q.Y - rootY))
+                .ToArray();
+            if (nearby.Length == 0) return null;
+            var nearest = nearby[0];
+            rootX = nearest.X;
+            rootY = nearest.Y;
+        }
+
+        var farthestQuantum = FarthestNavigableQuantum(
+            _walkableQuanta, rootX, rootY, pf, nav.Width, nav.Height, origin);
+        if (farthestQuantum is null) return null;
+
+        Vector2i? best = null;
+        long bestD2 = -1;
+        var minX = Math.Max(0, farthestQuantum.Value.X * VisitedQuantum);
+        var minY = Math.Max(0, farthestQuantum.Value.Y * VisitedQuantum);
+        var maxX = Math.Min(nav.Width, minX + VisitedQuantum);
+        var maxY = Math.Min(nav.Height, minY + VisitedQuantum);
+        for (var y = minY; y < maxY; y++)
+        for (var x = minX; x < maxX; x++)
+        {
+            if (pf.Read(x, y) <= 0) continue;
+            var candidate = new Vector2i { X = x, Y = y };
+            var d2 = DistanceSquared(origin, candidate);
+            if (d2 <= bestD2) continue;
+            bestD2 = d2;
+            best = candidate;
+        }
+
+        _farthestArea = ctx.Snapshot.AreaHash;
+        _farthestOrigin = origin;
+        _farthestConnectedPoint = best;
+        return best;
+    }
+
+    private void EnsureWalkableQuanta(BehaviorContext ctx, BubblesBot.Core.Pathfinding.ICellReader pf)
+    {
+        if (_walkableQuanta is not null && _walkableQuantaArea == ctx.Snapshot.AreaHash) return;
+        var nav = ctx.Snapshot.Nav;
+        var set = new HashSet<long>();
+        for (var y = 0; y < nav.Height; y += 5)
+        for (var x = 0; x < nav.Width; x += 5)
+            if (pf.Read(x, y) > 0)
+                set.Add(Pack(x / VisitedQuantum, y / VisitedQuantum));
+        _walkableQuanta = set;
+        _walkableQuantaArea = ctx.Snapshot.AreaHash;
+        _connectedWalkableQuanta = null;
+        _connectedWalkableRoot = 0;
     }
 
     public void Reset()
@@ -412,11 +515,16 @@ public sealed class ExplorationSystem
         _lastExhaustLog = TimeSpan.Zero;
         _walkableQuanta = null;
         _walkableQuantaArea = 0;
+        _connectedWalkableQuanta = null;
+        _connectedWalkableRoot = 0;
         _reachableWhenDry = null;
         _lastPlayer = null;
         _headingX = _headingY = 0;
         _waveOrigin = default;
         _maximumWaveRadius = 0;
+        _farthestArea = 0;
+        _farthestOrigin = default;
+        _farthestConnectedPoint = null;
         LastFrontierScore = 0;
         LastFrontierReason = "none";
         IsExhausted = false;
@@ -433,4 +541,130 @@ public sealed class ExplorationSystem
     }
 
     private static long Pack(int x, int y) => ((long)x << 32) | (uint)y;
+
+    private static (int X, int Y) Unpack(long value)
+        => ((int)(value >> 32), unchecked((int)(uint)value));
+
+    private static long DistanceSquared(Vector2i a, Vector2i b)
+    {
+        long dx = a.X - b.X, dy = a.Y - b.Y;
+        return dx * dx + dy * dy;
+    }
+
+    internal static HashSet<long> ConnectedComponent(HashSet<long> walkable, int startX, int startY)
+    {
+        var start = Pack(startX, startY);
+        if (!walkable.Contains(start)) return [];
+
+        var connected = new HashSet<long> { start };
+        var queue = new Queue<(int X, int Y)>();
+        queue.Enqueue((startX, startY));
+        while (queue.Count > 0)
+        {
+            var (x, y) = queue.Dequeue();
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                var nx = x + dx;
+                var ny = y + dy;
+                var key = Pack(nx, ny);
+                if (!walkable.Contains(key) || !connected.Add(key)) continue;
+                queue.Enqueue((nx, ny));
+            }
+        }
+        return connected;
+    }
+
+    internal static long PackQuantum(int x, int y) => Pack(x, y);
+
+    internal static (int X, int Y) SelectFarthestQuantum(
+        IEnumerable<long> connected, Vector2i origin)
+        => connected
+            .Select(Unpack)
+            .OrderByDescending(q => DistanceSquared(
+                origin,
+                new Vector2i { X = q.X * VisitedQuantum + VisitedQuantum / 2,
+                               Y = q.Y * VisitedQuantum + VisitedQuantum / 2 }))
+            .First();
+
+    private static (int X, int Y)? FarthestNavigableQuantum(
+        HashSet<long> walkable,
+        int startX,
+        int startY,
+        BubblesBot.Core.Pathfinding.ICellReader pf,
+        int width,
+        int height,
+        Vector2i origin)
+    {
+        var start = Pack(startX, startY);
+        if (!walkable.Contains(start)) return null;
+
+        var queue = new Queue<(int X, int Y, int Cost)>();
+        var seen = new HashSet<long> { start };
+        queue.Enqueue((startX, startY, 0));
+        var best = (X: startX, Y: startY);
+        var bestCost = 0;
+        var bestEuclidean = DistanceSquared(origin, QuantumCenter(startX, startY));
+        ReadOnlySpan<int> dxs = stackalloc[] { 1, -1, 0, 0 };
+        ReadOnlySpan<int> dys = stackalloc[] { 0, 0, 1, -1 };
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var euclidean = DistanceSquared(origin, QuantumCenter(current.X, current.Y));
+            if (current.Cost > bestCost || current.Cost == bestCost && euclidean > bestEuclidean)
+            {
+                best = (current.X, current.Y);
+                bestCost = current.Cost;
+                bestEuclidean = euclidean;
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                var nx = current.X + dxs[i];
+                var ny = current.Y + dys[i];
+                var key = Pack(nx, ny);
+                if (!walkable.Contains(key) || seen.Contains(key)) continue;
+                if (!CanCrossQuantumBoundary(
+                        current.X, current.Y, nx, ny, pf, width, height)) continue;
+                seen.Add(key);
+                queue.Enqueue((nx, ny, current.Cost + 1));
+            }
+        }
+        return best;
+    }
+
+    private static bool CanCrossQuantumBoundary(
+        int x, int y, int nx, int ny,
+        BubblesBot.Core.Pathfinding.ICellReader pf, int width, int height)
+    {
+        if (nx != x)
+        {
+            var boundaryX = Math.Max(x, nx) * VisitedQuantum;
+            if (boundaryX <= 0 || boundaryX >= width) return false;
+            var fromY = Math.Max(0, y * VisitedQuantum);
+            var toY = Math.Min(height, fromY + VisitedQuantum);
+            for (var cy = fromY; cy < toY; cy++)
+                if (pf.Read(boundaryX - 1, cy) > 0 && pf.Read(boundaryX, cy) > 0)
+                    return true;
+            return false;
+        }
+
+        var boundaryY = Math.Max(y, ny) * VisitedQuantum;
+        if (boundaryY <= 0 || boundaryY >= height) return false;
+        var fromX = Math.Max(0, x * VisitedQuantum);
+        var toX = Math.Min(width, fromX + VisitedQuantum);
+        for (var cx = fromX; cx < toX; cx++)
+            if (pf.Read(cx, boundaryY - 1) > 0 && pf.Read(cx, boundaryY) > 0)
+                return true;
+        return false;
+    }
+
+    private static Vector2i QuantumCenter(int x, int y)
+        => new()
+        {
+            X = x * VisitedQuantum + VisitedQuantum / 2,
+            Y = y * VisitedQuantum + VisitedQuantum / 2,
+        };
 }

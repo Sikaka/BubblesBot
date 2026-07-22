@@ -79,7 +79,7 @@ public static class LegacySettingsMigration
                 },
                 CurrencyReserves =
                 {
-                    new CurrencyReserve { Item = "PortalScroll", MinCount = 1, Policy = ReservePolicy.RetainFullestStack },
+                    new CurrencyReserve { Item = "PortalScroll", MinCount = 2, Policy = ReservePolicy.RetainFullestStack },
                 },
             },
             MapPrep = new MapPrepSection { AtlasNodeName = settings.MapFarmTargetMapName },

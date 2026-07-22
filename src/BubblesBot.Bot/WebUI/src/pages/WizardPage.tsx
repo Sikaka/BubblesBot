@@ -317,7 +317,9 @@ function ModeSettingsStep({ mode, schema, values, saved, onChange }: {
   saved: Settings;
   onChange: (path: string[], value: unknown) => void;
 }) {
-  const categories = mode === 5 ? ["Blight", "Blight chests"] : mode === 6 ? ["Simulacrum"] : [];
+  const categories = mode === 5 ? ["Blight", "Blight chests"]
+    : mode === 6 ? ["Simulacrum"]
+    : mode === 7 ? ["Guardian Rota"] : [];
   if (categories.length === 0) return null;
   return (
     <>
@@ -449,6 +451,7 @@ function ArmStep({ onFinish }: { onFinish: () => void }) {
         {selectedMode === 4 && <li>The Atlas node and map device are available.</li>}
         {selectedMode === 5 && <li>Blighted maps are in the configured Blight supplies tab.</li>}
         {selectedMode === 6 && <li>Simulacrums are in the configured Simulacrum supplies tab.</li>}
+        {selectedMode === 7 && <li>Carry 12 identified-or-identifiable Shaper Guardian maps plus Wisdom, Scour, Alchemy, and Chaos currency.</li>}
         {selectedMode === 0 && <li>Overlay mode will not automate Atlas, Blight, or Simulacrum runs.</li>}
       </ul>
       <div className="arm-hint">The bot only acts while PoE is the foreground window{status?.foreground ? "" : " — PoE is not focused right now"}.</div>

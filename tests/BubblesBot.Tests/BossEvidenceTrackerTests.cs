@@ -59,4 +59,39 @@ public sealed class BossEvidenceTrackerTests
         tracker.Observe([Boss(2, "x/BossB", 2, 2, 0)], new Vector2i { X = 0, Y = 0 }, true);
         Assert.True(tracker.IsComplete);
     }
+
+    [Fact]
+    public void ReappearingPhasedBossRevokesEarlierDeathInference()
+    {
+        var tracker = new BossEvidenceTracker();
+        tracker.Configure(["BossA"]);
+        tracker.Observe([Boss(1, "x/BossA/y", 5, 5, 800)], new Vector2i { X = 0, Y = 0 }, true);
+        tracker.Observe([], new Vector2i { X = 0, Y = 0 }, true);
+        Assert.True(tracker.IsComplete);
+
+        tracker.Observe([Boss(1, "x/BossA/y", 6, 6, 600)], new Vector2i { X = 0, Y = 0 }, true);
+        Assert.False(tracker.IsComplete);
+        Assert.Equal(0, tracker.BossesDead);
+    }
+
+    [Fact]
+    public void NewLivingPhaseEntityKeepsFragmentIncompleteDespiteOldCorpse()
+    {
+        var tracker = new BossEvidenceTracker();
+        tracker.Configure(["BossA"]);
+        tracker.Observe([Boss(1, "x/BossA/y", 5, 5, 0)], new Vector2i { X = 0, Y = 0 }, true);
+        tracker.Observe([Boss(2, "x/BossA/y", 6, 6, 600)], new Vector2i { X = 0, Y = 0 }, true);
+        Assert.False(tracker.IsComplete);
+    }
+
+    [Fact]
+    public void OneHpDeathActorDoesNotRevokeObservedBossDeath()
+    {
+        var tracker = new BossEvidenceTracker();
+        tracker.Configure(["BossA"]);
+        tracker.Observe([Boss(1, "x/BossA/y", 5, 5, 0)], new Vector2i { X = 0, Y = 0 }, true);
+        tracker.Observe([Boss(2, "x/BossA/y", 6, 6, 1, hpMax: 1)], new Vector2i { X = 0, Y = 0 }, true);
+        Assert.True(tracker.IsComplete);
+        Assert.Equal(1, tracker.BossesDead);
+    }
 }

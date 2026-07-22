@@ -2,7 +2,7 @@
 // the schema endpoint drives rendering, and unknown fields must round-trip untouched.
 
 export type FieldType =
-  | "modtable" | "flasks" | "skills" | "stringlist" | "options"
+  | "mapmodtable" | "modtable" | "flasks" | "skills" | "stringlist" | "options"
   | "bool" | "keycode" | "int" | "float" | "string" | "unknown";
 
 export interface SchemaField {
@@ -19,6 +19,8 @@ export interface SchemaField {
   options?: { label: string; value: number }[] | null;
   mods?: { id: string; name: string; defaultDanger: number }[] | null;
   tiers?: { label: string; value: number }[] | null;
+  mapMods?: { key: string; category: string; name: string; defaultPolicy: number }[] | null;
+  policies?: { label: string; value: number }[] | null;
 }
 
 export interface Schema { fields: SchemaField[] }
@@ -36,6 +38,10 @@ export interface SkillSlot {
   chargeCount: number;
   chargeRechargeMs: number;
   gemId?: number;
+  maintainedBuffName?: string;
+  requireNearbyEnemy?: boolean;
+  holdToRepeat?: boolean;
+  castTimeMs?: number;
   [extra: string]: unknown;   // server-side timing fields round-trip untouched
 }
 

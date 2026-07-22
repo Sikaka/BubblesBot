@@ -36,7 +36,8 @@ public sealed class InventoryView
         IReadOnlyList<(int Id, int Value)>? Stats = null,
         string BaseName = "",
         EntityListReader.EntityRarity Rarity = EntityListReader.EntityRarity.Normal,
-        int Quality = 0)
+        int Quality = 0,
+        bool Identified = false)
     {
         public int OccupiedCells => Math.Max(1, Width) * Math.Max(1, Height);
     }
@@ -75,8 +76,9 @@ public sealed class InventoryView
             var stack = ReadStackSize(reader, vi.ItemEntity);
             var stats = ItemStatsReader.Read(reader, vi.ItemEntity);
             var (baseName, rarity, quality) = ReadItemIdentity(reader, vi.ItemEntity);
+            var identified = ReadIdentified(reader, vi.ItemEntity);
             items.Add(new Item(vi.Address, vi.ItemEntity, rect, path, stack, vi.Width, vi.Height,
-                stats, baseName, rarity, quality));
+                stats, baseName, rarity, quality, identified));
         }
         return new InventoryView(true, items);
     }
@@ -162,6 +164,14 @@ public sealed class InventoryView
         if (components.TryGetValue("Quality", out var qualityAddress))
             reader.TryReadStruct(qualityAddress + KnownOffsets.QualityComponent.CurrentQuality, out quality);
         return (baseName, rarity, quality);
+    }
+
+    private static bool ReadIdentified(MemoryReader reader, nint itemEntity)
+    {
+        var components = EntityComponents.ReadComponentMap(reader, itemEntity);
+        return components.TryGetValue("Mods", out var mods)
+            && reader.TryReadStruct<byte>(mods + KnownOffsets.ModsComponent.Identified, out var value)
+            && value != 0;
     }
 
     private static int ReadStackSize(MemoryReader reader, nint itemEntity)

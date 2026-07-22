@@ -108,9 +108,18 @@ public sealed class MaintainSelfBuffs : IBehavior
             }
         }
 
-        // Self-buffs: recast the first ready one this tick (SkillBook interval spacing applies).
+        // Self-buffs: recast the first ready one this tick. A declared buff id turns this into
+        // live uptime maintenance; the nearby-enemy guard keeps degen buffs out of empty travel.
         foreach (var buff in ctx.Settings.Skills.OfRole(SkillRole.SelfBuff))
         {
+            if (buff.RequireNearbyEnemy
+                && Threat.Nearest(ctx, Math.Max(60f, buff.MaxRangeGrid)) is null)
+                continue;
+            var buffName = buff.MaintainedBuffName.Trim();
+            if (buffName.Length > 0
+                && ctx.Snapshot.Player is { } player
+                && player.Buffs.Has(buffName))
+                continue;
             if (_book is not null && !_book.IsReady(buff)) continue;
             if (_combat.Cast(buff, Aim.AtSelf(), ctx, $"buff {buff.Name}") == BehaviorStatus.Success)
             {

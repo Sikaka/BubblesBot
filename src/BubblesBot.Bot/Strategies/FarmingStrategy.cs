@@ -116,7 +116,8 @@ public sealed class ScarabLine
 public sealed class CurrencyReserve
 {
     public string Item { get; set; } = "PortalScroll";
-    public int MinCount { get; set; } = 1;
+    // Separate-arena boss maps consume one checkpoint scroll and one successful-exit scroll.
+    public int MinCount { get; set; } = 2;
     public ReservePolicy Policy { get; set; } = ReservePolicy.RetainFullestStack;
 }
 
@@ -136,10 +137,23 @@ public sealed class MapPrepSection
 public sealed class MapRollingSection
 {
     public MapRollingMode Mode { get; set; } = MapRollingMode.None;
+
+    /// <summary>
+    /// Flattened Stats.dat ids that make a rolled map unacceptable to this build. Numeric
+    /// identity keeps the strategy locale-independent and matches the map-item read side.
+    /// </summary>
+    public List<int> RejectedStatIds { get; set; } = new();
+
+    [SettingRange(1, 100, 1)]
+    public int MaxAttempts { get; set; } = 20;
 }
 
-/// <summary>Currency-rolling of maps before running them. Reserved; only None is executable.</summary>
-public enum MapRollingMode { None }
+/// <summary>
+/// Desired map preparation. Scoured is executable for inventory-fed generic map keys because
+/// the supply selector positively requires Normal rarity. Rare currency loops are represented
+/// now but remain activation-blocked until the currency application transaction is live-proven.
+/// </summary>
+public enum MapRollingMode { None, Scoured, Rare, RareCorrupted }
 
 /// <summary>
 /// One mechanic building block. The discriminated set is closed and in-repo — adding a mechanic
@@ -335,9 +349,9 @@ public sealed class StrongboxesBlock : MechanicBlock
 public sealed class LootStrategySection
 {
     /// <summary>
-    /// Overrides the profile's backtrack threshold for this strategy. Null inherits the
-    /// profile value; 0 is a real override meaning "remember every accepted label" (stacked
-    /// decks are individually below any sane profile threshold).
+    /// Overrides the profile's bounded mechanic-cleanup memory threshold for this strategy.
+    /// Null inherits the profile value; 0 remembers every accepted local drop. This never
+    /// authorizes a whole-map completion/backtracking pass.
     /// </summary>
     [SettingRange(0, 1000, 1)]
     public float? BacktrackMinChaosOverride { get; set; }

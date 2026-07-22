@@ -76,6 +76,10 @@ public sealed class SettingStringListAttribute : Attribute
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class SettingModTableAttribute : Attribute { }
 
+/// <summary>Renders semantic map modifiers with Allow/Avoid/Never build-policy choices.</summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class SettingMapModifierTableAttribute : Attribute { }
+
 /// <summary>
 /// Renders the property as a dropdown/select. Pass paired values: index 0 = label, index 1 =
 /// integer value, repeating. Example: <c>[SettingOptions("Loot", "0", "Waypoint test", "1")]</c>.

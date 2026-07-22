@@ -14,6 +14,9 @@ const ROLES = [
   { name: "Mark / curse", hint: "Aimed at the highest-priority rare or unique target." },
 ];
 const ROLE_DASH = 2;
+const ROLE_ATTACK = 3;
+const ROLE_SELF_BUFF = 4;
+const EMPTY_LIVE_SKILLS: LiveSkill[] = [];
 
 // PoE's default skill-bar slot to key binding. Slots 8+ are modifier-bound extras.
 const SLOT_DEFAULT_KEY: { vk: number; label: string }[] = [
@@ -35,7 +38,9 @@ interface Props {
 export function SkillsEditor({ value, onChange }: Props) {
   const profile: SlotProfile<SkillSlot> = value ?? { slots: [] };
   const slots = profile.slots ?? [];
-  const liveSkills = useStatusStore((state) => state.status?.liveSkills ?? []);
+  // Zustand's external-store snapshot must be referentially stable while disconnected.
+  // Allocating [] in the selector causes React's maximum-update-depth guard to trip.
+  const liveSkills = useStatusStore((state) => state.status?.liveSkills ?? EMPTY_LIVE_SKILLS);
   const [showDetected, setShowDetected] = useState(false);
 
   const setSlots = (next: SkillSlot[]) => onChange({ ...profile, slots: next });
@@ -47,14 +52,17 @@ export function SkillsEditor({ value, onChange }: Props) {
   };
 
   const useCurrentHotbar = () => {
-    const visible = liveSkills.filter((entry) => entry.barSlot < SLOT_DEFAULT_KEY.length);
+    const keyboard = liveSkills.filter((entry) => entry.barSlot >= 3 && entry.barSlot < SLOT_DEFAULT_KEY.length);
+    const visible = keyboard.filter((entry, index) =>
+      keyboard.findIndex((candidate) => candidate.gemId === entry.gemId) === index);
     const keyboardMove = [...visible].reverse().findIndex((entry) =>
       isMoveOnly(entry.name) && (SLOT_DEFAULT_KEY[entry.barSlot]?.vk ?? 0) > 0x06);
     const reversedMovementIndex = keyboardMove >= 0 ? visible.length - 1 - keyboardMove : -1;
     const movementIndex = reversedMovementIndex >= 0
       ? reversedMovementIndex
       : visible.findIndex((entry) => isMoveOnly(entry.name));
-    setSlots(visible.map((entry, index) => detectedSlot(entry, index === movementIndex ? 1 : 0)));
+    setSlots(visible.map((entry, index) => detectedSlot(entry,
+      index === movementIndex ? 1 : inferredRole(entry.name))));
     setShowDetected(false);
   };
 
@@ -120,17 +128,33 @@ export function SkillsEditor({ value, onChange }: Props) {
 
 function detectedSlot(entry: LiveSkill, role: number): SkillSlot {
   const def = SLOT_DEFAULT_KEY[entry.barSlot] ?? { vk: 0, label: "" };
+  const name = entry.name ?? "";
+  const blinkArrow = /^blink arrow$/i.test(name.trim());
+  const elementalHit = /^elemental hit( of the spectrum)?$/i.test(name.trim());
+  const bloodRage = /^blood rage$/i.test(name.trim());
   return {
     name: entry.name?.length ? entry.name : def.label ? `${def.label} skill` : `Unknown skill`,
     vk: def.vk,
     role,
-    canCrossGaps: false,
-    minCastIntervalMs: 100,
-    maxRangeGrid: 30,
+    canCrossGaps: blinkArrow,
+    minCastIntervalMs: elementalHit ? 150 : bloodRage ? 1000 : 100,
+    maxRangeGrid: elementalHit ? 55 : blinkArrow ? 50 : 30,
     chargeCount: Math.max(1, entry.maxUses || 1),
-    chargeRechargeMs: 3000,
+    chargeRechargeMs: blinkArrow ? 2000 : 3000,
     gemId: entry.gemId,
+    holdToRepeat: elementalHit,
+    castTimeMs: blinkArrow ? 900 : 0,
+    maintainedBuffName: bloodRage ? "blood_rage" : "",
+    requireNearbyEnemy: true,
   };
+}
+
+function inferredRole(name: string | undefined): number {
+  if (!name) return 0;
+  if (/^blink arrow$/i.test(name.trim())) return ROLE_DASH;
+  if (/^elemental hit( of the spectrum)?$/i.test(name.trim())) return ROLE_ATTACK;
+  if (/^blood rage$/i.test(name.trim())) return ROLE_SELF_BUFF;
+  return 0;
 }
 
 function isMoveOnly(name: string | undefined): boolean {
@@ -171,6 +195,26 @@ function SkillRow({ slot, onPatch, onRemove }: {
           This dash can cross gaps in terrain
         </label>
       )}
+      {Number(slot.role) === ROLE_ATTACK && (
+        <label className="skill-flag">
+          <input type="checkbox" checked={!!slot.holdToRepeat} onChange={(e) => onPatch({ holdToRepeat: e.target.checked })} />
+          Hold this attack to auto-repeat while a target remains in range
+        </label>
+      )}
+      {Number(slot.role) === ROLE_SELF_BUFF && (
+        <>
+          <label className="skill-primary-field">
+            <span>Active buff id</span>
+            <input type="text" placeholder="e.g. blood_rage" value={slot.maintainedBuffName ?? ""}
+              onChange={(e) => onPatch({ maintainedBuffName: e.target.value })} />
+          </label>
+          <label className="skill-flag">
+            <input type="checkbox" checked={slot.requireNearbyEnemy !== false}
+              onChange={(e) => onPatch({ requireNearbyEnemy: e.target.checked })} />
+            Activate only while an enemy is nearby
+          </label>
+        </>
+      )}
       <button type="button" className="skill-advanced-toggle" onClick={() => setAdvanced(!advanced)}>
         {advanced ? "Hide timing details" : "Timing, range & charges"}
       </button>
@@ -183,6 +227,7 @@ function SkillRow({ slot, onPatch, onRemove }: {
             <>
               <NumField label="Charges" value={slot.chargeCount} onChange={(v) => onPatch({ chargeCount: v })} />
               <NumField label="Recharge (ms)" value={slot.chargeRechargeMs} onChange={(v) => onPatch({ chargeRechargeMs: v })} />
+              <NumField label="Movement delay (ms)" value={Number(slot.castTimeMs ?? 0)} onChange={(v) => onPatch({ castTimeMs: v })} />
             </>
           )}
         </div>
