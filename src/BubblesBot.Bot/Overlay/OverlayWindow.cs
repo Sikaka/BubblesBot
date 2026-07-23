@@ -20,6 +20,11 @@ namespace BubblesBot.Bot.Overlay;
 /// </summary>
 public sealed class OverlayWindow : IDisposable
 {
+    public const int DashboardButtonX = 12;
+    public const int DashboardButtonY = 196;
+    public const int DashboardButtonWidth = 360;
+    public const int DashboardButtonHeight = 30;
+
     /// <summary>
     /// Compatibility shim for renderer code that used to clear with a chroma key. With
     /// per-pixel alpha we clear with fully-transparent black instead.
@@ -38,6 +43,7 @@ public sealed class OverlayWindow : IDisposable
     private nint _memDC;
     private nint _dibSection;
     private nint _dibSectionPrev; // previously-selected object in memDC
+    private bool _dashboardButtonInteractive;
 
     public int Width { get; private set; }
     public int Height { get; private set; }
@@ -45,6 +51,10 @@ public sealed class OverlayWindow : IDisposable
     public int OriginY { get; private set; }
     public bool IsValid => _hwnd != 0 && _renderTarget != null;
     public bool IsVisible { get; private set; } = true;
+    public bool IsDashboardButtonHovered { get; private set; }
+
+    /// <summary>Raised when the user clicks the dashboard button drawn by the renderer.</summary>
+    public event Action? DashboardRequested;
 
     /// <summary>
     /// The render target. Same shape as before (ID2D1RenderTarget) but backed by the DIB
@@ -241,6 +251,34 @@ public sealed class OverlayWindow : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Keep the overlay click-through everywhere except the visible dashboard button. The
+    /// transparent style is removed only while the pointer is over that small rectangle, so
+    /// normal PoE mouse input continues to pass through every other overlay pixel.
+    /// </summary>
+    public void RefreshDashboardButtonInteraction(bool enabled)
+    {
+        var hovered = false;
+        if (enabled && IsVisible && OverlayNative.GetCursorPos(out var cursor))
+            hovered = ContainsDashboardButton(cursor.X - OriginX, cursor.Y - OriginY);
+
+        IsDashboardButtonHovered = hovered;
+        if (_hwnd == 0 || hovered == _dashboardButtonInteractive) return;
+
+        var styles = (uint)(nuint)OverlayNative.GetWindowLongPtrW(_hwnd, OverlayNative.GWL_EXSTYLE);
+        styles = hovered
+            ? styles & ~OverlayNative.WS_EX_TRANSPARENT
+            : styles | OverlayNative.WS_EX_TRANSPARENT;
+        OverlayNative.SetWindowLongPtrW(_hwnd, OverlayNative.GWL_EXSTYLE, (nint)(nuint)styles);
+        _dashboardButtonInteractive = hovered;
+    }
+
+    internal static bool ContainsDashboardButton(int x, int y)
+        => x >= DashboardButtonX
+           && x < DashboardButtonX + DashboardButtonWidth
+           && y >= DashboardButtonY
+           && y < DashboardButtonY + DashboardButtonHeight;
+
     public bool PumpMessages()
     {
         while (OverlayNative.PeekMessageW(out var msg, 0, 0, 0, OverlayNative.PM_REMOVE))
@@ -254,6 +292,16 @@ public sealed class OverlayWindow : IDisposable
 
     private nint WndProc(nint hwnd, uint msg, nuint wParam, nint lParam)
     {
+        if (msg == OverlayNative.WM_LBUTTONDOWN)
+        {
+            var x = unchecked((short)((long)lParam & 0xffff));
+            var y = unchecked((short)(((long)lParam >> 16) & 0xffff));
+            if (ContainsDashboardButton(x, y))
+            {
+                DashboardRequested?.Invoke();
+                return 0;
+            }
+        }
         if (msg == OverlayNative.WM_DESTROY)
         {
             OverlayNative.PostQuitMessage(0);

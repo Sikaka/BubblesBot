@@ -11,7 +11,7 @@ namespace BubblesBot.Bot.Knowledge;
 
 /// <summary>
 /// Passive atlas-map documentation. It runs while the human uses the overlay as well as during
-/// automation, recording typed transitions, static tile markers, local terrain fingerprints,
+/// automation, recording typed transitions, semantic tile neighborhoods, local terrain fingerprints,
 /// and unique monsters observed after a transition. Observations are never trusted as automation
 /// policy after one run: manual confirmation is immediate; automatic boss-arena promotion needs
 /// corroboration from two distinct area instances.
@@ -21,9 +21,13 @@ public sealed class AtlasMapKnowledgeObserver
     private const int MaxInstanceHistory = 16;
     private const int TransitionNearGrid = 70;
     private const int TransitionDisplacementGrid = 100;
+    private const int PairedTransitionDisplacementGrid = 20;
     private static readonly long ObserveInterval = Stopwatch.Frequency / 2;
+    private static readonly long BossAssociationWindow = Stopwatch.Frequency * 5 * 60;
 
     private readonly string _path;
+    private readonly string _candidatePath;
+    private readonly bool _includeSharedCatalog;
     private readonly JsonSerializerOptions _json = new()
     {
         WriteIndented = true,
@@ -35,13 +39,16 @@ public sealed class AtlasMapKnowledgeObserver
     private uint _previousAreaHash;
     private Vector2i? _previousPlayer;
     private string? _previousNearbyTransitionKey;
-    private (string MapKey, string TransitionKey, uint InstanceHash)? _pendingBossAssociation;
+    private (string MapKey, string TransitionKey, uint InstanceHash, long ExpiresAt)? _pendingBossAssociation;
 
     public AtlasMapKnowledgeObserver(string? path = null)
     {
-        _path = path ?? System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "BubblesBot", "map-knowledge", "atlas-map-observations.json");
+        _includeSharedCatalog = path is null;
+        _path = path ?? AtlasKnowledgePromotion.DefaultObservationPath;
+        _candidatePath = path is null
+            ? AtlasKnowledgePromotion.DefaultCandidatePath
+            : System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(path)!, "atlas-map-candidates.json");
         _document = Load();
     }
 
@@ -72,6 +79,8 @@ public sealed class AtlasMapKnowledgeObserver
         var now = Stopwatch.GetTimestamp();
         if (now < _nextObservationAt) return;
         _nextObservationAt = now + ObserveInterval;
+        if (_pendingBossAssociation is { } expiring && now >= expiring.ExpiresAt)
+            _pendingBossAssociation = null;
         if (snapshot.Player is not { } player) return;
         var identity = ReadAreaIdentity(snapshot.Reader, snapshot.IngameDataAddress);
         if (identity.Id.Length == 0) return;
@@ -92,6 +101,11 @@ public sealed class AtlasMapKnowledgeObserver
         var mapKey = identity.Id;
         var map = GetOrCreateMap(mapKey, identity.Name);
         var changed = AddCapped(map.ObservedInstanceHashes, snapshot.AreaHash);
+        if (_document.SchemaVersion < 3)
+        {
+            _document.SchemaVersion = 3;
+            changed = true;
+        }
         map.LastObservedUtc = DateTime.UtcNow;
 
         var liveTransitions = entities.Entries.Values
@@ -102,6 +116,7 @@ public sealed class AtlasMapKnowledgeObserver
         foreach (var entry in liveTransitions)
         {
             var signature = TerrainLandmarkSignature.Compute(snapshot.Nav.PathReader, entry.GridPosition);
+            var semantic = SemanticTileNeighborhood.Capture(snapshot.TileMap, entry.GridPosition);
             var key = TransitionKey(entry, signature);
             var observation = map.Transitions.FirstOrDefault(candidate => candidate.Key == key);
             if (observation is null)
@@ -114,6 +129,9 @@ public sealed class AtlasMapKnowledgeObserver
                     DestinationAreaId = entry.DestinationAreaId,
                     DestinationAreaName = entry.DestinationAreaName,
                     TerrainSignature = signature,
+                    TileNeighborhoodSignature = semantic.Signature,
+                    TileNeighborhoodKeys = semantic.Keys.ToList(),
+                    TileNeighborhoodComponents = semantic.Components.ToList(),
                     SuggestedRole = entry.AreaTransitionType == AreaTransitionType.Local
                         ? "bossArenaCandidate"
                         : "zoneTransition",
@@ -124,6 +142,14 @@ public sealed class AtlasMapKnowledgeObserver
             }
             observation.LastObservedUtc = DateTime.UtcNow;
             changed |= AddCapped(observation.ObservedInstanceHashes, snapshot.AreaHash);
+            if (observation.TileNeighborhoodSignature.Length == 0
+                && semantic.Signature.Length > 0)
+            {
+                observation.TileNeighborhoodSignature = semantic.Signature;
+                observation.TileNeighborhoodKeys = semantic.Keys.ToList();
+                observation.TileNeighborhoodComponents = semantic.Components.ToList();
+                changed = true;
+            }
             changed |= AddDistinct(observation.TileMarkerPaths,
                 snapshot.TileEntities.Entries
                     .Where(marker => marker.Path.Contains("AreaTransition", StringComparison.OrdinalIgnoreCase)
@@ -143,7 +169,21 @@ public sealed class AtlasMapKnowledgeObserver
             && DistanceSquared(previous, player.GridPosition)
                 >= (long)TransitionDisplacementGrid * TransitionDisplacementGrid;
         var areaChanged = _previousAreaHash != 0 && _previousAreaHash != snapshot.AreaHash;
-        if ((displaced || areaChanged) && _previousNearbyTransitionKey is { } traversedKey)
+        var pairedTransitionSwitch = false;
+        if (_previousPlayer is { } priorPosition
+            && _previousNearbyTransitionKey is { } previousKey
+            && nearestTransitionKey is { } currentKey
+            && !previousKey.Equals(currentKey, StringComparison.Ordinal)
+            && DistanceSquared(priorPosition, player.GridPosition)
+                >= (long)PairedTransitionDisplacementGrid * PairedTransitionDisplacementGrid)
+        {
+            var previousTransition = map.Transitions.FirstOrDefault(candidate => candidate.Key == previousKey);
+            var currentTransition = map.Transitions.FirstOrDefault(candidate => candidate.Key == currentKey);
+            pairedTransitionSwitch = previousTransition is not null && currentTransition is not null
+                && IsComplementaryLocalTransitionPair(map.AreaId, previousTransition, currentTransition);
+        }
+        if ((displaced || areaChanged || pairedTransitionSwitch)
+            && _previousNearbyTransitionKey is { } traversedKey)
         {
             var priorMap = _document.Maps.Values.FirstOrDefault(candidate =>
                 candidate.Transitions.Any(transition => transition.Key == traversedKey));
@@ -152,7 +192,13 @@ public sealed class AtlasMapKnowledgeObserver
             {
                 changed |= AddCapped(traversed.TraversedInstanceHashes,
                     _previousAreaHash == 0 ? snapshot.AreaHash : _previousAreaHash);
-                _pendingBossAssociation = (priorMap.AreaId, traversedKey, snapshot.AreaHash);
+                // Keep the association alive across a phased encounter. Palace, for example,
+                // exposes PopeMapBoss first and DominusDemon (the loot-gating Husk) later; the
+                // old one-shot association cleared after the first unique observation and lost
+                // every subsequent phase. A later transition replaces this window immediately.
+                _pendingBossAssociation = (
+                    priorMap.AreaId, traversedKey, snapshot.AreaHash,
+                    now + BossAssociationWindow);
                 EventLog.Emit("map-knowledge", "map-knowledge.transition-traversed",
                     EventSeverity.Info,
                     $"observed transition traversal in '{priorMap.AreaName}' key={traversedKey}");
@@ -170,6 +216,16 @@ public sealed class AtlasMapKnowledgeObserver
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         changed |= AddDistinct(map.ObservedUniqueMonsterPaths, uniquePaths);
+        foreach (var path in uniquePaths)
+        {
+            if (!map.UniqueMonsterEvidenceInstanceHashes.TryGetValue(path, out var instances))
+            {
+                instances = [];
+                map.UniqueMonsterEvidenceInstanceHashes[path] = instances;
+                changed = true;
+            }
+            changed |= AddCapped(instances, snapshot.AreaHash);
+        }
 
         if (_pendingBossAssociation is { } pending && uniquePaths.Length > 0
             && _document.Maps.TryGetValue(pending.MapKey, out var parentMap))
@@ -177,18 +233,22 @@ public sealed class AtlasMapKnowledgeObserver
             var transition = parentMap.Transitions.FirstOrDefault(candidate => candidate.Key == pending.TransitionKey);
             if (transition is not null)
             {
-                changed |= AddDistinct(transition.BossMonsterPaths, uniquePaths);
-                changed |= AddCapped(transition.BossEvidenceInstanceHashes, pending.InstanceHash);
+                var pathsChanged = AddDistinct(transition.BossMonsterPaths, uniquePaths);
+                var evidenceChanged = AddCapped(
+                    transition.BossEvidenceInstanceHashes, pending.InstanceHash);
+                var wasConfirmed = transition.AutoConfirmed;
                 transition.SuggestedRole = "bossArenaCandidate";
                 transition.AutoConfirmed = transition.BossEvidenceInstanceHashes.Count >= 2;
                 if (transition.AutoConfirmed) parentMap.AutoHasSeparateBossArena = true;
-                EventLog.Emit("map-knowledge", "map-knowledge.boss-associated",
-                    EventSeverity.Info,
-                    $"associated {string.Join(", ", uniquePaths)} with '{parentMap.AreaName}' transition; "
-                    + $"instances={transition.BossEvidenceInstanceHashes.Count}");
-                changed = true;
+                if (pathsChanged || evidenceChanged || transition.AutoConfirmed != wasConfirmed)
+                {
+                    EventLog.Emit("map-knowledge", "map-knowledge.boss-associated",
+                        EventSeverity.Info,
+                        $"associated {string.Join(", ", uniquePaths)} with '{parentMap.AreaName}' transition; "
+                        + $"instances={transition.BossEvidenceInstanceHashes.Count}");
+                    changed = true;
+                }
             }
-            _pendingBossAssociation = null;
         }
 
         _previousAreaHash = snapshot.AreaHash;
@@ -214,19 +274,48 @@ public sealed class AtlasMapKnowledgeObserver
             map.AreaId.Equals(mapName, StringComparison.OrdinalIgnoreCase)
             || map.AreaName.Equals(mapName, StringComparison.OrdinalIgnoreCase));
 
-    private static bool IsConfirmedBossArena(AtlasMapKnowledgeEntry map, AtlasTransitionKnowledge transition)
+    internal static bool IsConfirmedBossArena(AtlasMapKnowledgeEntry map, AtlasTransitionKnowledge transition)
         => transition.ManualRole.Equals("bossArena", StringComparison.OrdinalIgnoreCase)
             || transition.AutoConfirmed
             || map.ManualHasSeparateBossArena == true && transition.BossMonsterPaths.Count > 0;
+
+    /// <summary>
+    /// Same-area detached arenas such as Mesa expose two nearby local transitions: an entrance with
+    /// no destination id and a return transition whose destination is the current map. Switching
+    /// which member is nearest is traversal evidence even when the phase displacement is far below
+    /// the ordinary 100-grid teleport threshold.
+    /// </summary>
+    internal static bool IsComplementaryLocalTransitionPair(
+        string areaId,
+        AtlasTransitionKnowledge first,
+        AtlasTransitionKnowledge second)
+    {
+        if (first.Type != AreaTransitionType.Local || second.Type != AreaTransitionType.Local
+            || !first.EntityPath.Equals(second.EntityPath, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var firstReturns = first.DestinationAreaId.Equals(areaId, StringComparison.OrdinalIgnoreCase);
+        var secondReturns = second.DestinationAreaId.Equals(areaId, StringComparison.OrdinalIgnoreCase);
+        var firstUnknown = string.IsNullOrWhiteSpace(first.DestinationAreaId);
+        var secondUnknown = string.IsNullOrWhiteSpace(second.DestinationAreaId);
+        return firstReturns && secondUnknown || secondReturns && firstUnknown;
+    }
+
+    internal static string TransitionKey(
+        string path,
+        bool identityReadable,
+        AreaTransitionType type,
+        string destinationAreaId,
+        string signature)
+        => $"{path}|{(identityReadable ? (AreaTransitionType?)type : null)}|"
+            + $"{destinationAreaId}|{signature}";
 
     private AtlasMapKnowledgeDocument Load()
     {
         try
         {
-            return File.Exists(_path)
-                ? JsonSerializer.Deserialize<AtlasMapKnowledgeDocument>(File.ReadAllText(_path), _json)
-                    ?? new AtlasMapKnowledgeDocument()
-                : new AtlasMapKnowledgeDocument();
+            return _includeSharedCatalog
+                ? AtlasKnowledgePromotion.LoadMerged(_path)
+                : AtlasKnowledgePromotion.LoadObservations(_path);
         }
         catch (Exception ex)
         {
@@ -245,6 +334,7 @@ public sealed class AtlasMapKnowledgeObserver
             var temporary = _path + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(_document, _json));
             File.Move(temporary, _path, true);
+            AtlasKnowledgePromotion.WriteCandidate(_document, _candidatePath);
         }
         catch (Exception ex)
         {
@@ -254,8 +344,12 @@ public sealed class AtlasMapKnowledgeObserver
     }
 
     private static string TransitionKey(EntityCache.Entry entry, string signature)
-        => $"{entry.Path}|{(entry.AreaTransitionIdentityReadable ? (AreaTransitionType?)entry.AreaTransitionType : null)}|"
-            + $"{entry.DestinationAreaId}|{signature}";
+        => TransitionKey(
+            entry.Path,
+            entry.AreaTransitionIdentityReadable,
+            entry.AreaTransitionType,
+            entry.DestinationAreaId,
+            signature);
 
     private static (string Id, string Name) ReadAreaIdentity(MemoryReader reader, nint ingameData)
     {
@@ -307,7 +401,7 @@ public sealed class AtlasMapKnowledgeObserver
 
 public sealed class AtlasMapKnowledgeDocument
 {
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 3;
     public Dictionary<string, AtlasMapKnowledgeEntry> Maps { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }
@@ -319,11 +413,14 @@ public sealed class AtlasMapKnowledgeEntry
     public DateTime LastObservedUtc { get; set; }
     public List<uint> ObservedInstanceHashes { get; set; } = [];
     public List<string> ObservedUniqueMonsterPaths { get; set; } = [];
+    public Dictionary<string, List<uint>> UniqueMonsterEvidenceInstanceHashes { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
     public List<AtlasTransitionKnowledge> Transitions { get; set; } = [];
 
     // Manual fields are deliberately first-class and preserved by the observer.
     public bool? ManualHasSeparateBossArena { get; set; }
     public List<string> ManualBossMonsterPaths { get; set; } = [];
+    public string ManualBossNotes { get; set; } = "";
     public bool AutoHasSeparateBossArena { get; set; }
 }
 
@@ -335,6 +432,9 @@ public sealed class AtlasTransitionKnowledge
     public string DestinationAreaId { get; set; } = "";
     public string DestinationAreaName { get; set; } = "";
     public string TerrainSignature { get; set; } = "";
+    public string TileNeighborhoodSignature { get; set; } = "";
+    public List<string> TileNeighborhoodKeys { get; set; } = [];
+    public List<string> TileNeighborhoodComponents { get; set; } = [];
     public List<string> TileMarkerPaths { get; set; } = [];
     public List<uint> ObservedInstanceHashes { get; set; } = [];
     public List<uint> TraversedInstanceHashes { get; set; } = [];

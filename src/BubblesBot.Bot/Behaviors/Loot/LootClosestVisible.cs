@@ -150,13 +150,14 @@ public sealed class LootClosestVisible : IBehavior
             // to catch labyrinth/quest doors that surface a ground label. Zone transitions
             // are deliberately excluded — they'd zone the player out unexpectedly.
             var outerPath = label.Path;
-            var isItem  = label.IsItem;
-            var isChest = !isItem && outerPath.StartsWith("Metadata/Chests/", StringComparison.Ordinal);
-            // Some map gates use a generic MiscellaneousObjects path and expose their
-            // actionable identity only as the visible ground-label text "Door". Treat that
-            // exact label as a door too; transition portals remain excluded.
-            var isDoor  = !isItem && !isChest && IsDoorIdentity(
-                outerPath, label.IsLabelVisible ? label.DisplayName : string.Empty);
+            var isItem = label.IsItem;
+            // Some map gates expose their identity only through Render.Name. Require the
+            // live TriggerableBlockage state to positively report closed before clicking;
+            // unknown/open doors must never be treated as generic chests.
+            var doorIdentity = !isItem && label.IsDoorIdentity;
+            var isDoor = IsActionableDoor(doorIdentity, label.DoorState);
+            var isChest = !isItem && !doorIdentity
+                && outerPath.StartsWith("Metadata/Chests/", StringComparison.Ordinal);
             if (!isItem && !isChest && !isDoor) continue;
             targets++;
 
@@ -365,6 +366,9 @@ public sealed class LootClosestVisible : IBehavior
     internal static bool IsDoorIdentity(string path, string displayName)
         => path.Contains("/Door", StringComparison.OrdinalIgnoreCase)
         || displayName.Equals("Door", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsActionableDoor(bool isDoorIdentity, DoorBlockageState state)
+        => isDoorIdentity && state == DoorBlockageState.Closed;
 
     /// <summary>Whether this label was written off after repeated failed clicks — shared with
     /// the mode's sweep gate so it doesn't keep steering toward a label we gave up on.</summary>

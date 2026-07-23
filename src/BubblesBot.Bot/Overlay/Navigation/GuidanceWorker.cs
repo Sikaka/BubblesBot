@@ -24,7 +24,7 @@ public sealed class GuidanceWorker : IDisposable
     private readonly MemoryReader _reader;
     private readonly CampaignData _data;
     private readonly Func<bool> _enabled;
-
+    private readonly string _atlasKnowledgePath;
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _signal = new(false);
     private volatile bool _disposed;
@@ -49,11 +49,16 @@ public sealed class GuidanceWorker : IDisposable
 
     public GuidanceSnapshot Current => _current;
 
-    public GuidanceWorker(ProcessHandle process, CampaignData data, Func<bool> enabled)
+    public GuidanceWorker(
+        ProcessHandle process,
+        CampaignData data,
+        Func<bool> enabled,
+        string atlasKnowledgePath)
     {
         _reader = new MemoryReader(process);
         _data = data;
         _enabled = enabled;
+        _atlasKnowledgePath = atlasKnowledgePath;
         _thread = new Thread(Loop) { IsBackground = true, Name = "GuidanceWorker" };
         _thread.Start();
     }
@@ -107,7 +112,9 @@ public sealed class GuidanceWorker : IDisposable
     {
         var route = _data.Route;
         var areaId = AreaIdentityReader.CurrentAreaId(
-            _reader, cursor.IngameData, id => route is not null && route.KnowsArea(id));
+            _reader, cursor.IngameData, id =>
+                id.StartsWith("MapWorlds", StringComparison.OrdinalIgnoreCase)
+                || route is not null && route.KnowsArea(id));
         if (string.IsNullOrEmpty(areaId))
             return new GuidanceSnapshot(cursor.AreaHash, string.Empty, Array.Empty<GuidanceTarget>(), "area id unavailable");
 
@@ -121,7 +128,10 @@ public sealed class GuidanceWorker : IDisposable
             _seenKeys.Clear();
         }
 
-        foreach (var (pos, label, kind) in FindAreaTargets(cursor, grid, areaId))
+        var resolvedTargets = areaId.StartsWith("MapWorlds", StringComparison.OrdinalIgnoreCase)
+            ? FindKnownAtlasTargets(cursor, grid, areaId)
+            : FindAreaTargets(cursor, grid, areaId);
+        foreach (var (pos, label, kind) in resolvedTargets)
         {
             if (_targets.Count >= MaxTargets) break;
             var key = $"{kind}:{pos.X / 8}:{pos.Y / 8}";
@@ -133,6 +143,126 @@ public sealed class GuidanceWorker : IDisposable
         var diag = _targets.Count == 0 ? "no targets found yet" : null;
         return new GuidanceSnapshot(cursor.AreaHash, areaId, _targets.ToArray(), diag);
     }
+
+    /// <summary>
+    /// Resolve only transitions whose live identity and terrain fingerprint match a confirmed
+    /// boss-arena transition in the passive Atlas knowledge store. Ordinary exits and side-area
+    /// portals deliberately remain absent from manual guidance.
+    /// </summary>
+    private List<(Vector2i Pos, string Label, RouteTokenType Kind)> FindKnownAtlasTargets(
+        WorldCursor cursor,
+        ICellReader grid,
+        string areaId)
+    {
+        var result = new List<(Vector2i, string, RouteTokenType)>();
+        Knowledge.AtlasMapKnowledgeDocument? document;
+        try
+        {
+            document = Knowledge.AtlasKnowledgePromotion.LoadMerged(_atlasKnowledgePath);
+        }
+        catch
+        {
+            return result;
+        }
+
+        if (document is null || !document.Maps.TryGetValue(areaId, out var map)) return result;
+        if (!_reader.TryReadStruct<nint>(
+                cursor.IngameData + KnownOffsets.IngameData.EntityList, out var listAddr)
+            || listAddr == 0)
+            return result;
+        var tiles = TileMapView.GetForArea(_reader, cursor.IngameData, cursor.AreaHash);
+
+        foreach (var address in EntityListReader.EnumerateEntityAddresses(
+                     _reader, listAddr).EntityAddresses)
+        {
+            var entity = EntityListReader.TryReadSnapshot(_reader, address);
+            if (entity is not { Kind: EntityListReader.EntityKind.AreaTransition, GridPosition: { } pos })
+                continue;
+
+            AreaTransitionIdentity identity = default;
+            var identityReadable = entity.Components.TryGetValue(
+                    "AreaTransition", out var component)
+                && AreaTransitionIdentityReader.TryRead(_reader, component, out identity);
+            var type = identityReadable ? identity.Type : default;
+            var destinationAreaId = identityReadable ? identity.DestinationAreaId : string.Empty;
+            var signature = Knowledge.TerrainLandmarkSignature.Compute(grid, pos);
+            var semantic = Knowledge.SemanticTileNeighborhood.Capture(tiles, pos);
+            var key = Knowledge.AtlasMapKnowledgeObserver.TransitionKey(
+                entity.Path, identityReadable, type, destinationAreaId, signature);
+            var liveTransition = new Knowledge.AtlasTransitionKnowledge
+            {
+                Key = key,
+                EntityPath = entity.Path,
+                Type = identityReadable ? type : null,
+                DestinationAreaId = destinationAreaId,
+                TerrainSignature = signature,
+                TileNeighborhoodSignature = semantic.Signature,
+                TileNeighborhoodKeys = semantic.Keys.ToList(),
+            };
+            if (!MatchesKnownBossTransition(map, liveTransition))
+                continue;
+
+            result.Add((pos, $"Boss arena: {map.AreaName}", RouteTokenType.Arena));
+        }
+
+        return result;
+    }
+
+    internal static bool IsKnownBossTransition(
+        Knowledge.AtlasMapKnowledgeEntry map,
+        Knowledge.AtlasTransitionKnowledge transition)
+        => Knowledge.AtlasMapKnowledgeObserver.IsConfirmedBossArena(map, transition);
+
+    /// <summary>
+    /// Exact fingerprints win. For generated-layout variants, inherit the role only when one
+    /// confirmed semantic prototype exists for the same entity path/type/destination. More than
+    /// one prototype is intentionally ambiguous and requires direct evidence.
+    /// </summary>
+    internal static bool MatchesKnownBossTransition(
+        Knowledge.AtlasMapKnowledgeEntry map,
+        Knowledge.AtlasTransitionKnowledge live)
+    {
+        var exact = map.Transitions.FirstOrDefault(candidate => candidate.Key == live.Key);
+        if (exact is not null
+            && Knowledge.AtlasMapKnowledgeObserver.IsConfirmedBossArena(map, exact))
+            return true;
+
+        if (live.TileNeighborhoodSignature.Length > 0
+            && map.Transitions.Any(candidate =>
+                Knowledge.AtlasMapKnowledgeObserver.IsConfirmedBossArena(map, candidate)
+                && SameSemanticIdentity(candidate, live)
+                && candidate.TileNeighborhoodSignature.Equals(
+                    live.TileNeighborhoodSignature, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        // A semantic-identity fallback is only safe when the map exposes one authored transition
+        // family for that identity. Multi-floor maps (Burial Chambers) reuse the same generic local
+        // AreaTransition entity for ordinary stairs and the final boss room; their distinct TGT
+        // neighborhoods must not inherit the one confirmed boss role.
+        var semanticFamilies = map.Transitions
+            .Where(candidate => SameSemanticIdentity(candidate, live)
+                && candidate.TileNeighborhoodSignature.Length > 0)
+            .Select(candidate => candidate.TileNeighborhoodSignature)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .Count();
+        if (semanticFamilies > 1) return false;
+
+        var prototypes = map.Transitions.Where(candidate =>
+                Knowledge.AtlasMapKnowledgeObserver.IsConfirmedBossArena(map, candidate)
+                && SameSemanticIdentity(candidate, live))
+            .Take(2)
+            .ToArray();
+        return prototypes.Length == 1;
+    }
+
+    private static bool SameSemanticIdentity(
+        Knowledge.AtlasTransitionKnowledge candidate,
+        Knowledge.AtlasTransitionKnowledge live)
+        => candidate.EntityPath.Equals(live.EntityPath, StringComparison.OrdinalIgnoreCase)
+            && candidate.Type == live.Type
+            && candidate.DestinationAreaId.Equals(
+                live.DestinationAreaId, StringComparison.OrdinalIgnoreCase);
 
     private List<(Vector2i Pos, string Label, RouteTokenType Kind)> FindAreaTargets(WorldCursor cursor, ICellReader grid, string areaId)
     {

@@ -175,6 +175,27 @@ public sealed class TileMapView
         return hits;
     }
 
+    /// <summary>
+    /// Every semantic detail-name / full <c>.tdt</c> path occurrence in a square neighborhood.
+    /// This is intentionally unfiltered: authored landmarks often have ordinary internal names,
+    /// so passive documentation must learn the local group instead of guessing useful tokens.
+    /// </summary>
+    public IReadOnlyList<TileKeyPosition> FindWithin(Vector2i center, int radiusGrid)
+    {
+        if (radiusGrid < 0) throw new ArgumentOutOfRangeException(nameof(radiusGrid));
+        var hits = new List<TileKeyPosition>();
+        foreach (var (key, positions) in _byKey)
+        {
+            foreach (var position in positions)
+            {
+                if (Math.Abs(position.X - center.X) > radiusGrid
+                    || Math.Abs(position.Y - center.Y) > radiusGrid) continue;
+                hits.Add(new TileKeyPosition(key, position));
+            }
+        }
+        return hits;
+    }
+
     /// <summary>True iff the key has any tiles registered.</summary>
     public bool Has(string key) => _byKey.ContainsKey(key);
 
@@ -242,3 +263,6 @@ public sealed class TileMapView
         catch { return string.Empty; }
     }
 }
+
+/// <summary>One semantic tile key at its 23-grid-cell tile origin.</summary>
+public readonly record struct TileKeyPosition(string Key, Vector2i Position);

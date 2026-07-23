@@ -48,7 +48,7 @@ public sealed class BotEnable
             if (!GameStateAllowsInput) return "ARMED — paused (game is not in-world)";
             if (!ForegroundOk) return "ARMED — paused (PoE not focused)";
             if (_settings.Current.ActiveMode == 0)
-                return LootKeyHeld ? "ARMED — LOOTING" : "ARMED — hold loot key";
+                return LootKeyHeld ? "ARMED — INTERACTING" : "ARMED — hold interact key";
             return "ARMED — RUNNING";
         }
     }

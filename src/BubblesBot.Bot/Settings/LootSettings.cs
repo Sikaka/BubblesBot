@@ -12,8 +12,8 @@ namespace BubblesBot.Bot.Settings;
 /// </summary>
 public sealed class LootSettings
 {
-    [Setting("Loot", "Loot hotkey",
-        "Win32 virtual-key code. Hold this key to make the looter click visible items. Default 0xC0 = backtick (`).")]
+    [Setting("Loot", "Interact / loot hotkey",
+        "Win32 virtual-key code. In Overlay/manual, hold this key to use safe nearby objects (available shrines, chests/strongboxes, verified closed doors) and pick up visible items. Portals and area transitions are excluded. Default 0xC0 = backtick (`).")]
     [SettingKeycode]
     public int HotkeyVk { get; set; } = 0xC0;
 

@@ -176,6 +176,7 @@ public sealed class OverlayRenderer : IDisposable
             DrawUniqueValueLabels(rt, ctx);
             DrawTargetBox(rt, ctx);
             DrawHudPanel(rt, ctx);
+            DrawDashboardButton(rt);
             DrawUpdateWarning(rt, ctx);
             DrawGuidanceHud(rt, ctx);
         }
@@ -1133,6 +1134,22 @@ public sealed class OverlayRenderer : IDisposable
         if (modeLines is not null)
             foreach (var line in modeLines)
                 Text(rt, line, _tfNormal!, _bDim!, x + padX, y + padY + lineH * row++, w - padX * 2, lineH);
+    }
+
+    /// <summary>Only interactive overlay surface; all pixels outside this button remain
+    /// click-through to PoE.</summary>
+    private void DrawDashboardButton(ID2D1RenderTarget rt)
+    {
+        var x = OverlayWindow.DashboardButtonX;
+        var y = OverlayWindow.DashboardButtonY;
+        var w = OverlayWindow.DashboardButtonWidth;
+        var h = OverlayWindow.DashboardButtonHeight;
+        var accent = _window.IsDashboardButtonHovered ? _bTarget! : _bGround!;
+
+        FillRect(rt, x, y, w, h, _bPanel!);
+        DrawRect(rt, x, y, w, h, accent, _window.IsDashboardButtonHovered ? 2f : 1f);
+        Text(rt, "OPEN WEB UI  |  localhost:5666", _tfNormal!, accent,
+            x + 10f, y + 6f, w - 20f, h - 8f);
     }
 
     /// <summary>Small, non-interactive release notice above the normal status panel.</summary>

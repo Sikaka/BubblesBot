@@ -50,6 +50,13 @@ dumps/
 /config.json
 /settings.json
 
+# Passive Atlas observations and sanitized promotion candidates remain local. The reviewed shared
+# catalog lives under src/BubblesBot.Bot/Resources and is explicitly embedded in builds.
+map-knowledge/
+**/map-knowledge/
+atlas-map-observations.json
+atlas-map-candidates.json
+
 # Research: local ground-truth facts + raw memory snapshots (machine/character/patch-specific, never committed)
 baseline.local.json
 **/baseline.local.json

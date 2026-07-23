@@ -1,0 +1,239 @@
+{
+  "SchemaVersion": 1,
+  "Maps": {
+    "MapWorldsBurialChambers": {
+      "AreaId": "MapWorldsBurialChambers",
+      "AreaName": "Burial Chambers",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": true,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/BanditLeaderInt/MapBanditLeaderAlira2@83"
+      ],
+      "BossNotes": "Multi-zone map. Ordinary floor transitions use barrow tile families; the final detached boss room contains Alira and uses the dungeon entrance/exit tile families.",
+      "Transitions": [
+        {
+          "EntityPath": "Metadata/MiscellaneousObjects/AreaTransition",
+          "Type": "local",
+          "DestinationAreaId": "",
+          "DestinationAreaName": "",
+          "TileNeighborhoodSignature": "AFC5C7E8B22DC3D75ADEFD2B",
+          "TileNeighborhoodKeys": [
+            "column",
+            "crumbledwalkway",
+            "entrance",
+            "metadata/terrain/dungeon/abyss/abyss_bottom_v01_01.tdt",
+            "metadata/terrain/dungeon/abyss/dungeon_crevice_corner_convex_v01_01.tdt",
+            "metadata/terrain/dungeon/abyss/dungeon_crevice_into_wall_v01_01.tdt",
+            "metadata/terrain/dungeon/abyss/dungeon_crevice_v01_01.tdt",
+            "metadata/terrain/dungeon/abyss/dungeon_crevice_v01_02.tdt",
+            "metadata/terrain/dungeon/abyss/dungeon_wall_crevice_v01_01.tdt",
+            "metadata/terrain/dungeon/black.tdt",
+            "metadata/terrain/dungeon/features/dungeon_column_crevice_v01_01.tdt",
+            "metadata/terrain/dungeon/features/dungeon_crevice_pathway_narrow_crumbled_v01_02.tdt",
+            "metadata/terrain/dungeon/features/dungeon_inca_exit_v01_02.tdt",
+            "metadata/terrain/dungeon/walkway/dungeon_crevice_pathway_narrow_tjunction_v01_01.tdt",
+            "metadata/terrain/dungeon/walkway/dungeon_crevice_pathway_narrow_v01_03.tdt",
+            "metadata/terrain/dungeon/walkway/dungeon_crevice_pathway_narrow_v01_04.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_straight_v02_01.tdt"
+          ],
+          "Role": "bossArena",
+          "BossMonsterPaths": [
+            "Metadata/Monsters/BanditLeaderInt/MapBanditLeaderAlira2@83"
+          ],
+          "Confidence": 1,
+          "Promotable": true,
+          "EvidenceInstances": 1,
+          "RequiredInstances": 1,
+          "ConfidenceReason": "human-confirmed role"
+        },
+        {
+          "EntityPath": "Metadata/MiscellaneousObjects/AreaTransition",
+          "Type": "local",
+          "DestinationAreaId": "MapWorldsBurialChambers",
+          "DestinationAreaName": "Burial Chambers",
+          "TileNeighborhoodSignature": "87CDEEBFAA2D08DCC782484E",
+          "TileNeighborhoodKeys": [
+            "circleskulls",
+            "column",
+            "forcedblank",
+            "metadata/terrain/dungeon/black.tdt",
+            "metadata/terrain/dungeon/features/dungeon_circle_skulls.tdt",
+            "metadata/terrain/dungeon/features/dungeon_inca_exit_ots_v01_01.tdt",
+            "metadata/terrain/dungeon/features/dungeon_thick_wall_pillar_v01_01.tdt",
+            "metadata/terrain/dungeon/features/dungeon_wall_post_v01_01.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_corner_concave_v02_02.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_corner_convex_v01_01.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_corner_convex_v02_01.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_straight_v03_01.tdt",
+            "metadata/terrain/dungeon/walls/dungeon_wall_straight_v04_01.tdt",
+            "metadata/terrain/forced_blank.tdt",
+            "ots",
+            "post"
+          ],
+          "Role": "bossArenaExit",
+          "BossMonsterPaths": [],
+          "Confidence": 1,
+          "Promotable": true,
+          "EvidenceInstances": 1,
+          "RequiredInstances": 1,
+          "ConfidenceReason": "human-confirmed role"
+        }
+      ]
+    },
+    "MapWorldsCanyon": {
+      "AreaId": "MapWorldsCanyon",
+      "AreaName": "Canyon",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": false,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/Cockerel/CockerelBowMapBoss@83",
+        "Metadata/Monsters/Pitbull/PitbullMapBoss@83"
+      ],
+      "BossNotes": "Dual connected-layout bosses confirmed together; both must be killed.",
+      "Transitions": []
+    },
+    "MapWorldsDunes": {
+      "AreaId": "MapWorldsDunes",
+      "AreaName": "Dunes",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": false,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/ZombieBoss/MapZombieBossHillock@83"
+      ],
+      "BossNotes": "Blacksmith is the single final boss in the connected map layout; no separate arena transition.",
+      "Transitions": []
+    },
+    "MapWorldsDungeon": {
+      "AreaId": "MapWorldsDungeon",
+      "AreaName": "Dungeon",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": true,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/Brute/MapBossBrute@83"
+      ],
+      "BossNotes": "Brute is the final boss in a detached Dungeon arena with a local entrance and return transition.",
+      "Transitions": []
+    },
+    "MapWorldsGhetto": {
+      "AreaId": "MapWorldsGhetto",
+      "AreaName": "Ghetto",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": false,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/DemonFemale/MapLightningWhipDemonBoss@83"
+      ],
+      "BossNotes": "Single connected-layout boss confirmed; no separate arena transition.",
+      "Transitions": []
+    },
+    "MapWorldsMesa": {
+      "AreaId": "MapWorldsMesa",
+      "AreaName": "Mesa",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": true,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/BanditLeaderStrDex/MapBanditLeaderOak@83"
+      ],
+      "BossNotes": "Oak is inside a detached arena at the center of the map. Local entrance and return transitions are both present.",
+      "Transitions": [
+        {
+          "EntityPath": "Metadata/MiscellaneousObjects/AreaTransition",
+          "Type": "local",
+          "DestinationAreaId": "",
+          "DestinationAreaName": "",
+          "TileNeighborhoodSignature": "E94CCCBE113A7C5A70F82E02",
+          "TileNeighborhoodKeys": [
+            "forcedblank",
+            "metadata/terrain/blank.tdt",
+            "metadata/terrain/forced_blank.tdt",
+            "metadata/terrain/mountain/plateau/features/mesa_boss_transition_v01_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v01_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v01_02.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v02_03.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_02.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_03.tdt",
+            "transition"
+          ],
+          "Role": "bossArena",
+          "BossMonsterPaths": [
+            "Metadata/Monsters/BanditLeaderStrDex/MapBanditLeaderOak@83"
+          ],
+          "Confidence": 1,
+          "Promotable": true,
+          "EvidenceInstances": 1,
+          "RequiredInstances": 1,
+          "ConfidenceReason": "human-confirmed role"
+        },
+        {
+          "EntityPath": "Metadata/MiscellaneousObjects/AreaTransition",
+          "Type": "local",
+          "DestinationAreaId": "MapWorldsMesa",
+          "DestinationAreaName": "Mesa",
+          "TileNeighborhoodSignature": "732FDC9CF992D7002835C3FA",
+          "TileNeighborhoodKeys": [
+            "forcedblank",
+            "metadata/terrain/blank.tdt",
+            "metadata/terrain/forced_blank.tdt",
+            "metadata/terrain/mountain/plateau/features/mesa_boss_transition_v01_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v01_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v01_02.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v01_03.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v02_03.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_01.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_02.tdt",
+            "metadata/terrain/mountain/plateau/ledge/lava_ledge_v03_03.tdt",
+            "transition"
+          ],
+          "Role": "bossArenaExit",
+          "BossMonsterPaths": [
+            "Metadata/Monsters/BanditLeaderStrDex/MapBanditLeaderOak@83"
+          ],
+          "Confidence": 1,
+          "Promotable": true,
+          "EvidenceInstances": 1,
+          "RequiredInstances": 1,
+          "ConfidenceReason": "human-confirmed role"
+        }
+      ]
+    },
+    "MapWorldsPalace": {
+      "AreaId": "MapWorldsPalace",
+      "AreaName": "Palace",
+      "Confidence": 1,
+      "Promotable": true,
+      "EvidenceInstances": 1,
+      "RequiredInstances": 1,
+      "ConfidenceReason": "human-confirmed map boss and arena topology",
+      "HasSeparateBossArena": true,
+      "BossMonsterPaths": [
+        "Metadata/Monsters/Dominusdemon/DominusDemonMapBoss@83"
+      ],
+      "BossNotes": "Multi-phase encounter: PopeMapBoss2 is an earlier phase; DominusDemonMapBoss is the final Husk whose death gates the boss drops.",
+      "Transitions": []
+    }
+  }
+}

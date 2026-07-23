@@ -45,6 +45,7 @@ internal static partial class OverlayNative
     public const uint WM_QUIT    = 0x0012;
     public const uint WM_PAINT   = 0x000F;
     public const uint WM_SIZE    = 0x0005;
+    public const uint WM_LBUTTONDOWN = 0x0201;
 
     // Class styles
     public const uint CS_HREDRAW = 0x0002;
@@ -165,6 +166,10 @@ internal static partial class OverlayNative
 
     [LibraryImport("user32.dll", EntryPoint = "GetForegroundWindow")]
     public static partial nint GetForegroundWindow();
+
+    [LibraryImport("user32.dll", EntryPoint = "GetCursorPos")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetCursorPos(out POINT lpPoint);
 
     /// <summary>
     /// Win32 GetAsyncKeyState. Returns &lt;0 (high bit set) if the key is currently down.

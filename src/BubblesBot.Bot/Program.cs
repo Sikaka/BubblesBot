@@ -1,7 +1,33 @@
 using BubblesBot.Bot;
 using BubblesBot.Bot.LiveTests;
+using BubblesBot.Bot.Knowledge;
 using BubblesBot.Core;
 using BubblesBot.Core.Snapshot;
+
+if (args.Length > 0
+    && args[0].Equals("--export-atlas-knowledge", StringComparison.OrdinalIgnoreCase))
+{
+    if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+    {
+        Console.Error.WriteLine("Usage: BubblesBot --export-atlas-knowledge <output-json>");
+        return 64;
+    }
+    try
+    {
+        var observations = AtlasKnowledgePromotion.LoadMerged(
+            AtlasKnowledgePromotion.DefaultObservationPath);
+        AtlasKnowledgePromotion.WriteCandidate(observations, Path.GetFullPath(args[1]), promotableOnly: true);
+        var promoted = AtlasKnowledgePromotion.PromotableOnly(
+            AtlasKnowledgePromotion.BuildCandidates(observations));
+        Console.WriteLine($"Exported {promoted.Maps.Count} sanitized Atlas map(s) to {Path.GetFullPath(args[1])}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Atlas knowledge export failed: {ex.Message}");
+        return 1;
+    }
+}
 
 var liveTestParse = LiveTestOptions.Parse(args);
 if (!liveTestParse.Success)
@@ -82,7 +108,7 @@ if (liveTestOptions.Command == LiveTestCommand.Run)
 // ── Run ───────────────────────────────────────────────────────────────────
 
 Console.WriteLine("Starting bot. Configure via web UI at http://localhost:5666");
-Console.WriteLine("Press Insert in-game to ARM/DISARM. Press F12 to hide/show the overlay. Press Ctrl+C in this terminal to exit.");
+Console.WriteLine("Press Insert in-game to ARM/DISARM. Press F12 to hide/show the overlay; click OPEN WEB UI for the dashboard. Press Ctrl+C in this terminal to exit.");
 
 using var app = new BotApp(process, reader, ingameDataAddr, ingameStateAddr, theGameSlots);
 

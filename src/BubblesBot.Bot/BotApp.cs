@@ -131,6 +131,7 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         _ingameStateAddress = ingameStateAddress;
         _gameState = new GameStateView(reader, theGameSlots ?? []);
         _overlayWindow = OverlayWindow.Create();
+        _overlayWindow.DashboardRequested += OpenDashboard;
         _renderer = new OverlayRenderer(_overlayWindow);
         _enable = new BotEnable(_settings);
         _loot = new LootMode(() => _currentSnapshot, _settings);
@@ -159,7 +160,11 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
         _entities = new EntityCache(_reader);
         // Campaign-guidance worker — own thread + reader. Enabled from settings; gated to the
         // manual/overlay mode where in-campaign guidance is useful.
-        _guidance = new Overlay.Navigation.GuidanceWorker(_process, Core.Campaign.CampaignData.Load(), GuidanceEnabled);
+        _guidance = new Overlay.Navigation.GuidanceWorker(
+            _process,
+            Core.Campaign.CampaignData.Load(),
+            GuidanceEnabled,
+            _atlasKnowledge.Path);
         // Pricing league: read live from ServerData (offset is canary-validated) so items
         // are valued against the CURRENT league's market. The LeagueName setting is only
         // the fallback for when memory isn't readable at attach. The catalog binds at
@@ -589,6 +594,9 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             if (_gameHwnd != 0)
                 _overlayWindow.TrackGameWindow(_gameHwnd);
 
+            _overlayWindow.RefreshDashboardButtonInteraction(
+                _gameHwnd != 0 && OverlayNative.IsForeground(_gameHwnd));
+
             if (!_overlayWindow.PumpMessages()) break;
 
             try
@@ -1016,6 +1024,24 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
 
         if (nextStatus is not null)
             Volatile.Write(ref _publishedStatus, nextStatus);
+    }
+
+    private static void OpenDashboard()
+    {
+        const string url = "http://localhost:5666";
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Diagnostics.EventLog.Emit(
+                "overlay", "overlay.dashboard-opened", Diagnostics.EventSeverity.Info,
+                $"opened dashboard at {url}");
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.EventLog.Emit(
+                "overlay", "overlay.dashboard-open-failed", Diagnostics.EventSeverity.Warning,
+                $"could not open dashboard at {url}: {ex.Message}");
+        }
     }
 
     private void TickPriceRefresh()
