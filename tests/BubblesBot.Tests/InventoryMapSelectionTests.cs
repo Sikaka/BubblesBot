@@ -66,6 +66,60 @@ public sealed class InventoryMapSelectionTests
         Assert.False(StashInventoryView.IsBlightRavagedMap(item));
     }
 
+    // Live capture 2026-07-23: regular Blighted maps carry {10187,10390,10476} without the uber
+    // stat; Blight-ravaged adds 14927; non-Blight maps carry none of the three.
+    [Fact]
+    public void RegularBlightedMapIsABlightMapButNotRavaged()
+    {
+        var item = new InventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier16", 1, 1, 1,
+            [(10187, 1), (10390, 1), (10476, 1)]);
+
+        Assert.True(InventoryView.IsBlightMap(item));
+        Assert.False(InventoryView.IsBlightRavagedMap(item));
+    }
+
+    [Fact]
+    public void RavagedMapIsAlsoABlightMap()
+    {
+        var item = new InventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier15", 1, 1, 1,
+            [(10187, 1), (10390, 1), (10476, 9), (InventoryView.UberBlightedMapStatId, 1)]);
+
+        Assert.True(InventoryView.IsBlightMap(item));
+        Assert.True(InventoryView.IsBlightRavagedMap(item));
+    }
+
+    [Fact]
+    public void NonBlightMapsAreNotBlightMaps()
+    {
+        // Plain white map (no stats) and a fully-rolled rare that shares none of the markers.
+        var plain = new InventoryView.Item(0, 0, null, "Metadata/Items/Maps/MapKeyTier16", 1, 1, 1);
+        var rolledRare = new InventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier16", 1, 1, 1,
+            [(991, 1), (1026, 38), (1041, 98), (1246, 60), (15645, 70)]);
+
+        Assert.False(InventoryView.IsBlightMap(plain));
+        Assert.False(InventoryView.IsBlightMap(rolledRare));
+    }
+
+    [Fact]
+    public void StashBlightMapAcceptsBothRegularAndRavaged()
+    {
+        var blighted = new StashInventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier16", 1, 1, 1,
+            [(10187, 1), (10390, 1), (10476, 1)]);
+        var ravaged = new StashInventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier15", 1, 1, 1,
+            [(10476, 9), (InventoryView.UberBlightedMapStatId, 1)]);
+        var plain = new StashInventoryView.Item(
+            0, 0, null, "Metadata/Items/Maps/MapKeyTier16", 1, 1, 1);
+
+        Assert.True(StashInventoryView.IsBlightMap(blighted));
+        Assert.True(StashInventoryView.IsBlightMap(ravaged));
+        Assert.False(StashInventoryView.IsBlightMap(plain));
+    }
+
     [Theory]
     [InlineData("Metadata/Items/Maps/MapKeyTier16", 0)]
     [InlineData("Metadata/Items/Maps/MapKeyTier16", -1)]

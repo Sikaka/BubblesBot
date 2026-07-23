@@ -476,8 +476,11 @@ public sealed class SimulacrumRunMode : IBotMode
                 Stop($"supply stash tab '{supplyTabName}' not found");
                 return;
             }
-            if (ctx.Snapshot.StashTabs.FindSelected(
-                    supplyTabName, requireGeneralPurpose: false, stash.VisibleTabIndex) is null)
+            // Drive the switcher until IT confirms selection (by visible-content pointer). Do NOT
+            // re-check StashTabs.FindSelected — its server display-index vs UI content-index compare
+            // never matches on migrated stashes, which made the mode ignore a successful switch and
+            // loop to timeout.
+            if (_supplyPanelObservedAt == TimeSpan.MinValue)
             {
                 if (!_supplyTabSwitcher.IsStarted
                     || !_supplyTabSwitcher.TargetName.Equals(
@@ -486,14 +489,15 @@ public sealed class SimulacrumRunMode : IBotMode
                 var switchResult = _supplyTabSwitcher.Tick(ctx);
                 LastDecision = $"Supply/SwitchTab: {_supplyTabSwitcher.Status}";
                 if (switchResult == StashTabSwitcher.Result.Failed)
+                {
                     Stop($"supply-tab switch failed: {_supplyTabSwitcher.Status}");
-                return;
-            }
-            if (_supplyTabSwitcher.IsStarted)
-            {
+                    return;
+                }
+                if (switchResult != StashTabSwitcher.Result.Succeeded)
+                    return;
                 _supplyTabSwitcher.Reset();
                 _supplyPanelObservedAt = BotMonotonicClock.Now;
-                LastDecision = "Supply: Deli tab selected; settling specialized layout";
+                LastDecision = $"Supply: '{supplyTabName}' selected; settling layout";
                 return;
             }
         }

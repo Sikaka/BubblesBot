@@ -71,6 +71,12 @@ internal sealed class GuardedLiveTestInput : IInputRouter
             ? _inner.VerifiedTapKey(vk, intent, description, expectResolved, timeoutMs)
             : new InputTicket(null);
 
+    public InputTicket VerifiedModifierTapKey(int vk, int[] modifiers, ClickIntent intent,
+        string description, Func<bool> expectResolved, int timeoutMs = 1500)
+        => Allowed()
+            ? _inner.VerifiedModifierTapKey(vk, modifiers, intent, description, expectResolved, timeoutMs)
+            : new InputTicket(null);
+
     public InputTicket VerifiedTapScanCode(int scanCode, ClickIntent intent, string description,
         Func<bool> expectResolved, int timeoutMs = 1500)
         => Allowed()

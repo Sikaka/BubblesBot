@@ -175,10 +175,15 @@ public sealed class OverlayRenderer : IDisposable
             DrawHpBars(rt, ctx);
             DrawUniqueValueLabels(rt, ctx);
             DrawTargetBox(rt, ctx);
-            DrawHudPanel(rt, ctx);
-            DrawDashboardButton(rt);
-            DrawUpdateWarning(rt, ctx);
-            DrawGuidanceHud(rt, ctx);
+            // Operator chrome (F12): panels/buttons/banners that overlap the play area. The
+            // informational overlay above always draws — F12 hides only these blocking elements.
+            if (ctx.ChromeVisible)
+            {
+                DrawHudPanel(rt, ctx);
+                DrawDashboardButton(rt);
+                DrawUpdateWarning(rt, ctx);
+                DrawGuidanceHud(rt, ctx);
+            }
         }
         finally
         {

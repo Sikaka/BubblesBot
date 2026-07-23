@@ -27,13 +27,22 @@ public sealed class StashInventoryView
     public int TotalTabs { get; }
     public IReadOnlyList<Item> Items { get; }
 
+    /// <summary>
+    /// Address of the currently-visible tab's content root. Changes whenever the active tab
+    /// switches (each tab's content element is distinct), so it is the reliable "which tab am I
+    /// on" signal for switch confirmation — unlike the server display index, which does not track
+    /// keyboard/click tab changes on migrated stashes.
+    /// </summary>
+    public nint VisibleStashAddress { get; }
+
     private StashInventoryView(
-        bool isOpen, int visibleTabIndex, int totalTabs, IReadOnlyList<Item> items)
+        bool isOpen, int visibleTabIndex, int totalTabs, IReadOnlyList<Item> items, nint visibleStash = 0)
     {
         IsOpen = isOpen;
         VisibleTabIndex = visibleTabIndex;
         TotalTabs = totalTabs;
         Items = items;
+        VisibleStashAddress = visibleStash;
     }
 
     public static StashInventoryView FromIngameUi(
@@ -102,7 +111,7 @@ public sealed class StashInventoryView
                 queue.Enqueue((child, depth + 1));
         }
 
-        return new StashInventoryView(true, index, total, items);
+        return new StashInventoryView(true, index, total, items, visible);
     }
 
     private static int ReadStackSize(MemoryReader reader, nint entity)
@@ -131,6 +140,16 @@ public sealed class StashInventoryView
         => item.Path.Contains(InventoryView.MapPathFragment, StringComparison.OrdinalIgnoreCase)
         && item.Stats is not null
         && item.Stats.Any(stat => stat.Id == InventoryView.UberBlightedMapStatId && stat.Value > 0);
+
+    /// <summary>
+    /// Positive check for a Blight map of EITHER kind (regular Blighted or Blight-ravaged) in the
+    /// visible stash tab — both are valid Blight-farming supply. Mirrors
+    /// <see cref="InventoryView.IsBlightMap"/> using the shared <see cref="InventoryView.BlightMapStatIds"/>.
+    /// </summary>
+    public static bool IsBlightMap(in Item item)
+        => item.Path.Contains(InventoryView.MapPathFragment, StringComparison.OrdinalIgnoreCase)
+        && item.Stats is not null
+        && item.Stats.Any(stat => Array.IndexOf(InventoryView.BlightMapStatIds, stat.Id) >= 0 && stat.Value > 0);
 
     public static bool IsNormalUnqualifiedMap(in Item item, string targetMapName)
     {

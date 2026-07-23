@@ -441,8 +441,9 @@ public sealed class MapRunMode : IBotMode
             return;
         }
         var stash = ctx.Snapshot.StashInventory;
-        if (ctx.Snapshot.StashTabs.FindSelected(
-                tabName, requireGeneralPurpose: false, stash.VisibleTabIndex) is null)
+        // Drive the switcher until IT confirms selection (by visible-content pointer); the old
+        // StashTabs.FindSelected re-check never matches on migrated stashes and looped to timeout.
+        if (_supplyTabObservedAt == TimeSpan.MinValue)
         {
             if (!_supplyTabSwitcher.IsStarted
                 || !_supplyTabSwitcher.TargetName.Equals(tabName, StringComparison.OrdinalIgnoreCase))
@@ -450,11 +451,12 @@ public sealed class MapRunMode : IBotMode
             var switched = _supplyTabSwitcher.Tick(ctx);
             _phase = $"map supply: {_supplyTabSwitcher.Status}";
             if (switched == StashTabSwitcher.Result.Failed)
+            {
                 Stop($"map supply tab switch failed: {_supplyTabSwitcher.Status}");
-            return;
-        }
-        if (_supplyTabSwitcher.IsStarted)
-        {
+                return;
+            }
+            if (switched != StashTabSwitcher.Result.Succeeded)
+                return;
             _supplyTabSwitcher.Reset();
             _supplyTabObservedAt = BotMonotonicClock.Now;
             _phase = $"map supply: on '{tabName}', settling items";

@@ -31,6 +31,11 @@ public sealed class LiveTestContext
     public WindowInfo Window => ReadWindow();
     internal MemoryReader Reader => _reader;
 
+    /// <summary>The guarded input router, for tests that drive a production system (e.g. a
+    /// behavior/switcher) directly. Pump <see cref="IInputRouter.Tick"/> each loop iteration to
+    /// resolve in-flight tickets, exactly as the bot's tick loop does.</summary>
+    public IInputRouter Input => _input;
+
     internal LiveTestContext(
         MemoryReader reader,
         nint ingameDataAddress,
@@ -106,6 +111,19 @@ public sealed class LiveTestContext
         CancellationToken cancellationToken)
     {
         var ticket = _input.VerifiedTapKey(vk, intent, description, postcondition, timeoutMs);
+        return await AwaitVerifiedTicketAsync(ticket, description, cancellationToken);
+    }
+
+    public async Task<ActionOutcome> VerifiedModifierTapKeyAsync(
+        int vk,
+        int[] modifiers,
+        ClickIntent intent,
+        string description,
+        Func<bool> postcondition,
+        int timeoutMs,
+        CancellationToken cancellationToken)
+    {
+        var ticket = _input.VerifiedModifierTapKey(vk, modifiers, intent, description, postcondition, timeoutMs);
         return await AwaitVerifiedTicketAsync(ticket, description, cancellationToken);
     }
 

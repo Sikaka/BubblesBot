@@ -6,9 +6,13 @@ using BubblesBot.Core.Snapshot;
 namespace BubblesBot.Bot.Systems;
 
 /// <summary>
-/// Selects an exact visible stash-tab label with hover ancestry and visible-index confirmation.
-/// Keyboard arrows are intentionally not used: large Standard stashes group-jump rather than
-/// stepping individual tabs, so they cannot reliably reach a requested display index.
+/// Selects an exact visible stash-tab label with hover ancestry, then confirms the switch by the
+/// visible-content pointer changing (each tab's content root is a distinct element). We do NOT
+/// cross-check a server display index: it does not track click/keyboard tab changes on migrated
+/// stashes (validated live 2026-07-23 — the field stayed on the last *clicked* tab while the active
+/// tab moved). Because clicking an already-active tab is a no-op, "content changed" OR "content
+/// stayed put after clicking the target's own label" both mean we are on the target — which is
+/// unambiguous for a uniquely-named tab. Duplicate names remain best-effort (any same-named switch).
 /// </summary>
 public sealed class StashTabSwitcher
 {
@@ -16,6 +20,15 @@ public sealed class StashTabSwitcher
 
     private const int MaxClickAttempts = 4;
     private const int UniqueLabelFallbackMs = 1200;
+    // After clicking the target's label, the content settling this long with no change means the
+    // target was already the active tab (clicking it did nothing) — treat as selected.
+    private const int ConfirmSettleMs = 450;
+    // When the target label isn't rendered, cycle the active root tab (Ctrl+Left) to bring the root
+    // strip back into view. Bounded so a genuinely-missing name still fails closed.
+    private const int MaxReachSteps = 24;
+    private const int ReachThrottleMs = 300;
+    private const int VkLeftArrow = 0x25;
+    private static readonly int[] CtrlModifier = { 0x11 };
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
     private readonly Func<GameSnapshot?> _getSnapshot;
@@ -27,6 +40,12 @@ public sealed class StashTabSwitcher
     private int _hoverCandidateIndex;
     private TimeSpan _hoverStartedAt = TimeSpan.MinValue;
     private nint _hoverTarget;
+    // Switch-confirmation state: the visible-content pointer captured just before our click, and
+    // whether we have clicked the target's label at least once.
+    private nint _preClickVisible;
+    private bool _clickedTarget;
+    private int _reachSteps;
+    private TimeSpan _lastReachAt = TimeSpan.MinValue;
 
     public string TargetName => _targetName;
     public string Status { get; private set; } = "idle";
@@ -45,6 +64,10 @@ public sealed class StashTabSwitcher
         _hoverCandidateIndex = 0;
         _hoverStartedAt = TimeSpan.MinValue;
         _hoverTarget = 0;
+        _preClickVisible = 0;
+        _clickedTarget = false;
+        _reachSteps = 0;
+        _lastReachAt = TimeSpan.MinValue;
         Status = $"locating tab '{_targetName}'";
     }
 
@@ -55,6 +78,10 @@ public sealed class StashTabSwitcher
         _hoverCandidateIndex = 0;
         _hoverStartedAt = TimeSpan.MinValue;
         _hoverTarget = 0;
+        _preClickVisible = 0;
+        _clickedTarget = false;
+        _reachSteps = 0;
+        _lastReachAt = TimeSpan.MinValue;
         Status = "idle";
     }
 
@@ -83,31 +110,33 @@ public sealed class StashTabSwitcher
             return Result.InProgress;
         }
 
-        var current = ctx.Snapshot.StashInventory.VisibleTabIndex;
-        if (catalog.FindSelected(_targetName, _requireGeneralPurpose, current) is { } selected)
+        var currentVisible = ctx.Snapshot.StashInventory.VisibleStashAddress;
+        var nameCount = catalog.Tabs.Count(
+            t => t.Name.Equals(_targetName, StringComparison.OrdinalIgnoreCase));
+
+        // Confirmation: we clicked the target's own label. If the visible content switched, we
+        // moved onto it; if it stayed put after the click settled, the target was already active
+        // (clicking it is a no-op). Either way we are on the target — unambiguous for a unique name.
+        if (_clickedTarget && currentVisible != 0)
         {
-            Status = $"on tab '{selected.Name}' index={selected.DisplayIndex}";
-            BubblesBot.Bot.Diagnostics.EventLog.Emit(
-                "stash", "stash.tab-selected",
-                BubblesBot.Bot.Diagnostics.EventSeverity.Info,
-                Status,
-                new Dictionary<string, object?>
-                {
-                    ["name"] = target.Name,
-                    ["displayIndex"] = selected.DisplayIndex,
-                    ["type"] = selected.Type,
-                    ["generalPurposeRequired"] = _requireGeneralPurpose,
-                });
-            return Result.Succeeded;
+            var switched = _preClickVisible != 0 && currentVisible != _preClickVisible;
+            var settled = BotMonotonicClock.ElapsedSince(_lastActionAt).TotalMilliseconds >= ConfirmSettleMs;
+            if (switched || settled)
+            {
+                EmitSelected(target, currentVisible, switched, ambiguous: nameCount > 1);
+                return Result.Succeeded;
+            }
+            Status = $"confirming '{target.Name}' (content {(switched ? "changed" : "settling")})";
+            return Result.InProgress;
         }
-        if (current < 0)
+        if (currentVisible == 0)
         {
-            Status = "waiting for visible stash index";
+            Status = "waiting for visible stash content";
             return Result.InProgress;
         }
         var maxClickAttempts = LatencyPolicy.RetryLimit(MaxClickAttempts, ctx.Settings);
         if (_clickAttempts >= maxClickAttempts)
-            return Fail($"click limit selecting '{target.Name}' from index {current}");
+            return Fail($"click limit selecting '{target.Name}'");
         if (BotMonotonicClock.ElapsedSince(_lastActionAt).TotalMilliseconds < 250)
             return Result.InProgress;
 
@@ -118,7 +147,27 @@ public sealed class StashTabSwitcher
                 && candidate.Rect.CenterY < ctx.Snapshot.Window.Height)
             .ToArray();
         if (candidates.Length == 0)
-            return Fail($"exact visible stash tab label '{target.Name}' not found");
+        {
+            // Label isn't rendered — we're viewing a different tab set (e.g. inside a folder/sub-tab
+            // context). Cycle the active ROOT tab with Ctrl+Left (validated live to move the active
+            // tab) to bring the root strip back so the label becomes clickable. Bounded + throttled.
+            if (_reachSteps >= MaxReachSteps)
+                return Fail($"could not reveal stash tab label '{target.Name}' after {_reachSteps} root-tab steps");
+            if (BotMonotonicClock.ElapsedSince(_lastReachAt).TotalMilliseconds < ReachThrottleMs)
+                return Result.InProgress;
+            var reach = ctx.Input.VerifiedModifierTapKey(
+                VkLeftArrow, CtrlModifier, ClickIntent.InteractUi,
+                $"reveal stash tab '{target.Name}' (Ctrl+Left)",
+                expectResolved: () => _getSnapshot() is { IsStashOpen: true },
+                timeoutMs: 800);
+            if (reach.Accepted)
+            {
+                _reachSteps++;
+                _lastReachAt = BotMonotonicClock.Now;
+                Status = $"revealing '{target.Name}' (root-tab step {_reachSteps}/{MaxReachSteps})";
+            }
+            return Result.InProgress;
+        }
 
         // Duplicate tab names are common after migrations. Try each exact visible label in
         // deterministic left-to-right order; only the server-authoritative display index can
@@ -166,25 +215,48 @@ public sealed class StashTabSwitcher
             }
         }
 
+        _preClickVisible = currentVisible;
         var ticket = ctx.Input.Click(
             sx, sy, ClickIntent.InteractUi,
             $"select exact stash tab '{target.Name}'",
+            // Resolve as soon as the visible content switches (fast path when not already active).
+            // An already-active target won't change and is confirmed by the settle check above.
             expectResolved: () => _getSnapshot() is { } live
                 && live.IsStashOpen
-                && live.StashTabs.FindSelected(
-                    _targetName, _requireGeneralPurpose,
-                    live.StashInventory.VisibleTabIndex) is not null,
+                && live.StashInventory.VisibleStashAddress != _preClickVisible
+                && live.StashInventory.VisibleStashAddress != 0,
             timeoutMs: 1800);
         if (ticket.Accepted)
         {
             _clickAttempts++;
+            _clickedTarget = true;
             _lastActionAt = BotMonotonicClock.Now;
             _hoverCandidateIndex = (_hoverCandidateIndex + 1) % candidates.Length;
             _hoverTarget = 0;
             _hoverStartedAt = TimeSpan.MinValue;
-            Status = $"selecting '{target.Name}' from index {current} ({_clickAttempts}/{maxClickAttempts})";
+            Status = $"selecting '{target.Name}' ({_clickAttempts}/{maxClickAttempts})";
         }
         return Result.InProgress;
+    }
+
+    private void EmitSelected(StashTabsView.Tab target, nint visible, bool switched, bool ambiguous)
+    {
+        Status = ambiguous
+            ? $"on a tab named '{target.Name}' (duplicate name — best-effort)"
+            : $"on tab '{target.Name}'";
+        BubblesBot.Bot.Diagnostics.EventLog.Emit(
+            "stash", "stash.tab-selected",
+            BubblesBot.Bot.Diagnostics.EventSeverity.Info,
+            Status,
+            new Dictionary<string, object?>
+            {
+                ["name"] = target.Name,
+                ["type"] = target.Type,
+                ["visibleContent"] = $"0x{visible:X}",
+                ["switched"] = switched,
+                ["ambiguousDuplicate"] = ambiguous,
+                ["generalPurposeRequired"] = _requireGeneralPurpose,
+            });
     }
 
     private static bool HoverResolvesTo(GameSnapshot snapshot, nint target)

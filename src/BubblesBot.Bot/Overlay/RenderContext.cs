@@ -32,4 +32,8 @@ public sealed record RenderContext(
     // Draw compact HP bars above hostile monsters (see BotSettings.ShowEntityHpBars).
     bool HpBars = false,
     // Draw the cyan player blip at map-overlay center (see BotSettings.ShowMapPlayerBlip).
-    bool PlayerBlip = false);
+    bool PlayerBlip = false,
+    // F12 toggles this. When false, the operator "chrome" that overlaps active play — the status
+    // panel, the open-web-UI button, the top guidance banner, the update notice — is suppressed,
+    // but the informational overlay (map hack, guidance routes, HP bars, nameplates) keeps drawing.
+    bool ChromeVisible = true);

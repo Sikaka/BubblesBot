@@ -91,6 +91,33 @@ public sealed class MovementSystem
     }
 
     /// <summary>
+    /// One discrete move-key TAP toward <paramref name="targetGrid"/> (any existing hold is released
+    /// first). A tap toward an open heading moves the character a step; toward a blocker it doesn't —
+    /// which the walk-only unstick uses to detect a blocked direction. Returns false if projection
+    /// failed or no walk key is bound.
+    /// </summary>
+    public bool TapToward(Vector2i targetGrid, BehaviorContextLite ctx, object? owner = null)
+    {
+        Release(owner);                 // discrete tap, not a sustained hold
+        var live = ctx.Live;
+        if (live is null) return false;
+        var walk = _settings.Current.Skills.WalkSlot;
+        if (walk is null || walk.Vk == 0) return false;
+
+        var screen = ctx.Snapshot.Camera.GridToScreenAtPlayerZ(targetGrid, live.Value.WorldPosition.Z);
+        if (screen is null) return false;
+        var (sx, sy) = screen.Value;
+        var w = ctx.Snapshot.Window;
+        sx = Math.Clamp(sx, 0, Math.Max(0, w.Width  - 1));
+        sy = Math.Clamp(sy, 0, Math.Max(0, w.Height - 1));
+        var (absX, absY) = w.ToScreen(sx, sy);
+
+        ctx.Input.HoverAt(absX, absY, CursorPriority.Walk);   // SetCursorPos is synchronous
+        ctx.Input.TapKey(walk.Vk, ClickIntent.UseSkill, "unstick nudge tap");
+        return true;
+    }
+
+    /// <summary>
     /// Stop the player by hovering the cursor onto the player's own screen position. Cleaner
     /// than just releasing — PoE registers "movement target = self" as a stop immediately.
     /// </summary>

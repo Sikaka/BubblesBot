@@ -48,13 +48,31 @@ public sealed class SettingsValidatorTests
             error.Path == "guardianInvitationPreferredQuantity");
     }
 
-    [Fact]
-    public void GuardianDumpTabCannotBeBlank()
+    [Theory]
+    [InlineData("guardianDumpTabName")]
+    [InlineData("simulacrumSupplyTabName")]
+    [InlineData("simulacrumDumpTabName")]
+    [InlineData("blightSupplyTabName")]
+    [InlineData("blightDumpTabName")]
+    public void StashTabNameCannotBeBlank(string path)
     {
-        var settings = new BotSettings { GuardianDumpTabName = "  " };
+        var settings = new BotSettings();
+        switch (path)
+        {
+            case "guardianDumpTabName": settings.GuardianDumpTabName = "  "; break;
+            case "simulacrumSupplyTabName": settings.SimulacrumSupplyTabName = "  "; break;
+            case "simulacrumDumpTabName": settings.SimulacrumDumpTabName = "  "; break;
+            case "blightSupplyTabName": settings.BlightSupplyTabName = "  "; break;
+            case "blightDumpTabName": settings.BlightDumpTabName = "  "; break;
+        }
 
-        Assert.Contains(SettingsValidator.Validate(settings), error =>
-            error.Path == "guardianDumpTabName");
+        Assert.Contains(SettingsValidator.Validate(settings), error => error.Path == path);
+    }
+
+    [Fact]
+    public void DefaultSettingsHaveNoValidationErrors()
+    {
+        Assert.Empty(SettingsValidator.Validate(new BotSettings()));
     }
 
     [Fact]

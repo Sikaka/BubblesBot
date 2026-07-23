@@ -63,6 +63,14 @@ public static class LiveTestHost
             Console.WriteLine($"Evidence: {recorder.EvidenceDirectory}");
             Console.WriteLine($"Setup: {test.ManualSetup}");
 
+            // Input tests require PoE foreground. Pull it forward ourselves so a headless run
+            // doesn't hinge on a human clicking the game first; the foreground check still gates.
+            if (test.DrivesInput && hwnd != 0 && !OverlayNative.IsForeground(hwnd))
+            {
+                OverlayNative.ForceForeground(hwnd);
+                await Task.Delay(400, combined.Token);
+            }
+
             if (!RunPreflight(context, test, options, hwnd, gameState))
             {
                 result = LiveTestCaseResult.Blocked("generic preflight failed");

@@ -705,10 +705,12 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             && (OverlayNative.GetAsyncKeyState(OverlayVisibilityToggle.VirtualKey) & 0x8000) != 0;
         if (_overlayVisibility.Observe(overlayToggleDown))
         {
-            _overlayWindow.SetVisible(_overlayVisibility.IsVisible);
+            // F12 toggles operator chrome only (status panel, web-UI button, guidance banner,
+            // update notice). The layered window stays shown so the map hack, guidance routes,
+            // and HP bars keep drawing for active play — see RenderContext.ChromeVisible.
             Diagnostics.EventLog.Emit(
                 "overlay", "overlay.visibility-toggled", Diagnostics.EventSeverity.Info,
-                _overlayVisibility.IsVisible ? "overlay shown (F12)" : "overlay hidden (F12)");
+                _overlayVisibility.IsVisible ? "HUD chrome shown (F12)" : "HUD chrome hidden (F12)");
         }
         Systems.BotMonotonicClock.SetPaused(!_enable.ShouldAct);
         var automationArmed = _settings.Current.BotActive;
@@ -934,9 +936,9 @@ public sealed class BotApp : IDisposable, Web.IControlSurface
             GuidanceRoutes: guidanceRoutes,
             UpdateWarning:  updateWarning,
             HpBars:         _settings.Current.ShowEntityHpBars,
-            PlayerBlip:     _settings.Current.ShowMapPlayerBlip);
-        if (_overlayVisibility.IsVisible)
-            _renderer.Render(ctx);
+            PlayerBlip:     _settings.Current.ShowMapPlayerBlip,
+            ChromeVisible:  _overlayVisibility.IsVisible);
+        _renderer.Render(ctx);
 
         var tickDurationMs = Stopwatch.GetElapsedTime(tickStarted).TotalMilliseconds;
         _runtimeMetrics = new Diagnostics.RuntimeMetricsSnapshot(

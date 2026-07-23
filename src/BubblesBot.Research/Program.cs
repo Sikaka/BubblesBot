@@ -127,9 +127,10 @@ static int RunInspectInventoryView(string[] args)
     foreach (var item in inventory.Items.Where(item => InventoryView.IsMap(item)))
     {
         var uberStat = item.Stats?.FirstOrDefault(stat => stat.Id == InventoryView.UberBlightedMapStatId);
-        Console.WriteLine($"map path={item.Path} rarity={item.Rarity} quality={item.Quality} " +
-            $"rect={item.Rect?.ToString() ?? "null"} stats={item.Stats?.Count ?? -1} " +
-            $"uber={uberStat?.Value.ToString() ?? "none"} eligibleT16={InventoryView.IsNormalTierMap(item, 16)}");
+        var allStats = item.Stats is null ? "null"
+            : string.Join(",", item.Stats.Select(s => $"{s.Id}={s.Value}"));
+        Console.WriteLine($"map base='{item.BaseName}' rarity={item.Rarity} quality={item.Quality} " +
+            $"uber={uberStat?.Value.ToString() ?? "none"} stats=[{allStats}]");
     }
     return 0;
 }

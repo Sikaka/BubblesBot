@@ -847,8 +847,8 @@ public sealed class BlightMode : IBotMode
     /// <summary>
     /// Complete the deterministic between-run hideout preflight before the map device is
     /// allowed to consume anything: Dump all loot, switch to Supplies, withdraw exactly one
-    /// positively identified Blight-ravaged map, then close the stash. Returns true only
-    /// after that contract is satisfied.
+    /// positively identified Blight map (regular Blighted or Ravaged), then close the stash.
+    /// Returns true only after that contract is satisfied.
     /// </summary>
     private bool TickHideoutPreparation(BehaviorContext ctx)
     {
@@ -934,15 +934,15 @@ public sealed class BlightMode : IBotMode
             return false;
         }
 
-        var carried = CountCarriedBlightRavagedMaps(ctx.Snapshot.Inventory);
+        var carried = CountCarriedBlightMaps(ctx.Snapshot.Inventory);
         if (carried > 0)
         {
-            // A Blight-ravaged map is an unstackable item. More than one means our exactly-one
-            // preflight invariant was violated, so do not hand an ambiguous inventory to the
-            // map device.
+            // A Blight map (Blighted or Ravaged) is an unstackable item. More than one means our
+            // exactly-one preflight invariant was violated, so do not hand an ambiguous inventory to
+            // the map device.
             if (carried != 1)
             {
-                StopBlightLoop($"expected exactly one carried Blight-ravaged map, found {carried}");
+                StopBlightLoop($"expected exactly one carried Blight map, found {carried}");
                 return false;
             }
             if (_supplyWithdrawPending)
@@ -952,7 +952,7 @@ public sealed class BlightMode : IBotMode
                 Diagnostics.EventLog.Emit(
                     "blight", "blight.supply-withdraw-confirmed",
                     Diagnostics.EventSeverity.Info,
-                    "one Blight-ravaged map appeared in player inventory",
+                    "one Blight map appeared in player inventory",
                     new Dictionary<string, object?>
                     {
                         ["withdrawalsTotal"] = _mapsWithdrawnTotal,
@@ -960,7 +960,7 @@ public sealed class BlightMode : IBotMode
             }
             _supplyMissingSince = TimeSpan.MinValue;
             _hideoutPhase = HideoutPhase.CloseStash;
-            _hideoutStatus = "verified one carried Blight-ravaged map";
+            _hideoutStatus = "verified one carried Blight map";
             return false;
         }
 
@@ -980,8 +980,9 @@ public sealed class BlightMode : IBotMode
         }
 
         var stash = ctx.Snapshot.StashInventory;
-        if (ctx.Snapshot.StashTabs.FindSelected(
-                supplyTabName, requireGeneralPurpose: false, stash.VisibleTabIndex) is null)
+        // Drive the switcher until IT confirms selection (by visible-content pointer); the old
+        // StashTabs.FindSelected re-check never matches on migrated stashes and looped to timeout.
+        if (_supplyPanelObservedAt == TimeSpan.MinValue)
         {
             if (!_supplyTabSwitcher.IsStarted
                 || !_supplyTabSwitcher.TargetName.Equals(
@@ -990,12 +991,12 @@ public sealed class BlightMode : IBotMode
             var switchResult = _supplyTabSwitcher.Tick(ctx);
             _hideoutStatus = _supplyTabSwitcher.Status;
             if (switchResult == StashTabSwitcher.Result.Failed)
+            {
                 StopBlightLoop($"supply-tab switch failed: {_supplyTabSwitcher.Status}");
-            return false;
-        }
-
-        if (_supplyTabSwitcher.IsStarted)
-        {
+                return false;
+            }
+            if (switchResult != StashTabSwitcher.Result.Succeeded)
+                return false;
             _supplyTabSwitcher.Reset();
             _supplyPanelObservedAt = BotMonotonicClock.Now;
             _hideoutStatus = $"on '{supplyTabName}'; settling item layout";
@@ -1016,7 +1017,7 @@ public sealed class BlightMode : IBotMode
         StashInventoryView.Item? target = null;
         foreach (var item in stash.Items)
         {
-            if (!StashInventoryView.IsBlightRavagedMap(item) || item.Rect is null) continue;
+            if (!StashInventoryView.IsBlightMap(item) || item.Rect is null) continue;
             target = item;
             break;
         }
@@ -1028,11 +1029,11 @@ public sealed class BlightMode : IBotMode
             if (BotMonotonicClock.ElapsedSince(_supplyMissingSince).TotalSeconds >= 2)
             {
                 StopBlightLoop(
-                    $"no positively identified Blight-ravaged map in supply tab '{supplyTabName}'");
+                    $"no positively identified Blight map in supply tab '{supplyTabName}'");
             }
             else
             {
-                _hideoutStatus = "waiting for a verified Blight-ravaged map";
+                _hideoutStatus = "waiting for a verified Blight map";
             }
             return false;
         }
@@ -1040,7 +1041,7 @@ public sealed class BlightMode : IBotMode
         _supplyMissingSince = TimeSpan.MinValue;
         if (_supplyClickAttempts >= MaxSupplyClicks)
         {
-            StopBlightLoop($"failed to withdraw a Blight-ravaged map after {MaxSupplyClicks} attempts");
+            StopBlightLoop($"failed to withdraw a Blight map after {MaxSupplyClicks} attempts");
             return false;
         }
         if (BotMonotonicClock.ElapsedSince(_lastSupplyActionAt).TotalMilliseconds < 600)
@@ -1052,8 +1053,8 @@ public sealed class BlightMode : IBotMode
         var itemEntity = target.Value.ItemEntity;
         var ticket = ctx.Input.ModifierClick(
             x, y, [VkLeftControl], ClickIntent.InteractUi,
-            "withdraw one Blight-ravaged map",
-            expectResolved: () => CountCarriedBlightRavagedMaps(
+            "withdraw one Blight map",
+            expectResolved: () => CountCarriedBlightMaps(
                 _getSnapshot()?.Inventory) == 1,
             timeoutMs: 2000);
         if (ticket.Accepted)
@@ -1097,12 +1098,12 @@ public sealed class BlightMode : IBotMode
             });
     }
 
-    private static int CountCarriedBlightRavagedMaps(InventoryView? inventory)
+    private static int CountCarriedBlightMaps(InventoryView? inventory)
     {
         if (inventory is null || !inventory.IsOpen) return 0;
         var count = 0;
         foreach (var item in inventory.Items)
-            if (InventoryView.IsBlightRavagedMap(item)) count++;
+            if (InventoryView.IsBlightMap(item)) count++;
         return count;
     }
 

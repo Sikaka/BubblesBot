@@ -118,6 +118,14 @@ public interface IInputRouter
     InputTicket VerifiedTapKey(int vk, ClickIntent intent, string description,
         Func<bool> expectResolved, int timeoutMs = 1500);
 
+    /// <summary>
+    /// Tap a key with modifier keys latched (e.g. Ctrl+Left to step the active stash tab), through
+    /// the one-in-flight gate with a verified postcondition. Modifiers are pressed before the tap
+    /// and released after, in reverse order.
+    /// </summary>
+    InputTicket VerifiedModifierTapKey(int vk, int[] modifiers, ClickIntent intent, string description,
+        Func<bool> expectResolved, int timeoutMs = 1500);
+
     /// <summary>Tap a hardware scan code through the one-in-flight gate and verify a postcondition.</summary>
     InputTicket VerifiedTapScanCode(int scanCode, ClickIntent intent, string description,
         Func<bool> expectResolved, int timeoutMs = 1500);

@@ -167,6 +167,48 @@ internal static partial class OverlayNative
     [LibraryImport("user32.dll", EntryPoint = "GetForegroundWindow")]
     public static partial nint GetForegroundWindow();
 
+    [LibraryImport("user32.dll", EntryPoint = "SetForegroundWindow")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetForegroundWindow(nint hwnd);
+
+    [LibraryImport("user32.dll", EntryPoint = "BringWindowToTop")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool BringWindowToTop(nint hwnd);
+
+    [LibraryImport("user32.dll", EntryPoint = "AttachThreadInput")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetCurrentThreadId")]
+    public static partial uint GetCurrentThreadId();
+
+    /// <summary>
+    /// Best-effort bring a window to the OS foreground. Modern Windows refuses a plain
+    /// SetForegroundWindow from a non-foreground process, so we temporarily attach our input
+    /// thread to the target window's thread (the documented workaround) around the call. Returns
+    /// true if the window is foreground afterwards. Used so headless input live-tests don't depend
+    /// on a human clicking PoE first.
+    /// </summary>
+    public static bool ForceForeground(nint hwnd)
+    {
+        if (hwnd == 0) return false;
+        if (GetForegroundWindow() == hwnd) return true;
+        ShowWindow(hwnd, 9 /* SW_RESTORE */);
+        var targetThread = GetWindowThreadProcessId(hwnd, out _);
+        var selfThread = GetCurrentThreadId();
+        var attached = targetThread != selfThread && AttachThreadInput(selfThread, targetThread, true);
+        try
+        {
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(selfThread, targetThread, false);
+        }
+        return GetForegroundWindow() == hwnd;
+    }
+
     [LibraryImport("user32.dll", EntryPoint = "GetCursorPos")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GetCursorPos(out POINT lpPoint);

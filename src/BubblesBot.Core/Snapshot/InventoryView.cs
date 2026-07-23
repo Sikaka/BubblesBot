@@ -21,6 +21,12 @@ public sealed class InventoryView
     public const string PortalScrollPathFragment = "CurrencyPortal";
     public const string SimulacrumPathFragment = "CurrencyAfflictionFragment";
     public const string MapPathFragment = "/Maps/MapKey";
+    // "Map contains a Blight encounter" marker — present on BOTH regular Blighted and Blight-ravaged
+    // maps, absent on non-Blight maps. Verified live 2026-07-23: all 3 Blight maps (2 Normal Blighted
+    // + 1 Ravaged) carried {10187=1,10390=1,10476≥1}; 4 non-Blight maps (a 16-stat rolled rare, two
+    // plain whites, a rare) carried NONE of them. LEAGUE/PATCH-VOLATILE — recapture with
+    // `--inspect-inventory-view` (a Blighted + a plain map in inventory) after each patch.
+    public static readonly int[] BlightMapStatIds = { 10187, 10390, 10476 };
     // Stats.dat key: is_uber_blighted_map. Live-correlated against the
     // UberInfectedMap__ raw mod on 2026-07-15.
     public const int UberBlightedMapStatId = 14927;
@@ -119,6 +125,17 @@ public sealed class InventoryView
         => IsMap(item)
         && item.Stats is not null
         && item.Stats.Any(stat => stat.Id == UberBlightedMapStatId && stat.Value > 0);
+
+    /// <summary>
+    /// True for a map carrying a Blight encounter of EITHER kind — a regular Blighted map or a
+    /// Blight-ravaged map. Both are valid supply for Blight farming; only the ravaged subtype
+    /// additionally exposes <see cref="UberBlightedMapStatId"/>. Uses <see cref="BlightMapStatIds"/>,
+    /// which are absent on non-Blight maps (see that field's remarks).
+    /// </summary>
+    public static bool IsBlightMap(in Item item)
+        => IsMap(item)
+        && item.Stats is not null
+        && item.Stats.Any(stat => Array.IndexOf(BlightMapStatIds, stat.Id) >= 0 && stat.Value > 0);
 
     public static bool IsNormalUnqualifiedMap(in Item item, string targetMapName)
     {

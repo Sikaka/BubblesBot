@@ -31,11 +31,25 @@ public static class SettingsValidator
             errors.Add(new SettingsValidationError(
                 "guardianInvitationPreferredQuantity",
                 "must be greater than or equal to the minimum invitation quantity"));
-        if (string.IsNullOrWhiteSpace(settings.GuardianDumpTabName))
-            errors.Add(new SettingsValidationError(
-                "guardianDumpTabName", "dump tab name cannot be empty"));
+
+        // Tab names are free-text and drive StashTabSwitcher's exact-label lookup, so an empty
+        // one can never resolve — reject it here rather than let a run exhaust the switch timeout.
+        foreach (var (path, value) in TabNames(settings))
+            if (string.IsNullOrWhiteSpace(value))
+                errors.Add(new SettingsValidationError(path, "stash tab name cannot be empty"));
+
         return errors;
     }
+
+    // camelCase paths mirror the schema/PATCH field names so a 422 points the UI at the right box.
+    private static IEnumerable<(string Path, string? Value)> TabNames(BotSettings s) =>
+    [
+        ("guardianDumpTabName", s.GuardianDumpTabName),
+        ("simulacrumSupplyTabName", s.SimulacrumSupplyTabName),
+        ("simulacrumDumpTabName", s.SimulacrumDumpTabName),
+        ("blightSupplyTabName", s.BlightSupplyTabName),
+        ("blightDumpTabName", s.BlightDumpTabName),
+    ];
 
     private static List<Rule> BuildRules(Type rootType)
     {

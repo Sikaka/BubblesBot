@@ -264,6 +264,23 @@ public sealed class InputRouter : IInputRouter
         return DispatchToken(actionId, intent, $"{intent}: {description}", expectResolved, timeoutMs);
     }
 
+    public InputTicket VerifiedModifierTapKey(int vk, int[] modifiers, ClickIntent intent, string description,
+        Func<bool> expectResolved, int timeoutMs = 1500)
+    {
+        modifiers ??= [];
+        var actionId = Request(intent, description, "verified-modifier-key-tap", vk: vk);
+        if (!IsIdle) return Suppress(actionId, intent, description, "gate-busy");
+        if (_held.TryGetValue(vk, out var h) && h.IsActive)
+            return Suppress(actionId, intent, description, "key-held");
+        if (modifiers.Any(m => _held.TryGetValue(m, out var hm) && hm.IsActive))
+            return Suppress(actionId, intent, description, "modifier-held");
+        if (!TryConsumeActionBudget()) return Suppress(actionId, intent, description, "action-budget");
+        Accepted(actionId, intent, description);
+        SendInputNative.ModifierKeyTap(modifiers, vk);
+        var modDesc = string.Join(",", modifiers.Select(m => $"0x{m:X}"));
+        return DispatchToken(actionId, intent, $"{intent}: {description} (mod={modDesc})", expectResolved, timeoutMs);
+    }
+
     public InputTicket VerifiedTapScanCode(int scanCode, ClickIntent intent, string description,
         Func<bool> expectResolved, int timeoutMs = 1500)
     {

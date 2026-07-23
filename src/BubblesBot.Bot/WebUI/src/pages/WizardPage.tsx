@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ApiError, controlArm, controlMode, fetchMeta, fetchSchema, fetchSettings, patchSettings,
-  type BotMeta, type FieldError, type PatchOp,
+  type BotMeta, type FieldError, type PatchOp, type SettingsEnvelope,
 } from "../api/client";
 import type { Schema, Settings } from "../api/types";
 import {
@@ -67,11 +67,20 @@ export default function WizardPage() {
       .catch((e) => setError(String(e)));
   }, [store.settingsDraft]);
 
-  // Load the schema even when resuming a draft (schema isn't persisted).
+  // Resuming a persisted draft: the draft (the user's edits) is restored from localStorage, but
+  // the schema, the diff baseline, and the concurrency version must ALWAYS come fresh from the
+  // running bot — the persisted draft never carries a trustworthy version, and a stale one causes
+  // the Review-step save to 409 permanently. Refresh all three on mount regardless of the draft.
   useEffect(() => {
     if (!schema) fetchSchema().then(setSchema).catch((e) => setError(String(e)));
-    if (!original) fetchSettings().then((e) => setOriginal(e.settings)).catch(() => {});
-  }, [schema, original]);
+    fetchSettings()
+      .then((envelope) => {
+        setOriginal(envelope.settings);
+        useWizardStore.setState({ settingsVersion: envelope.version });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Atlas gets strategy steps; Blight and Simulacrum get their dedicated settings; Overlay
   // needs neither. Keeping the branches exclusive prevents a stale Atlas strategy from being
@@ -341,26 +350,54 @@ function ReviewStep({ schema, original, onDone, onError }: {
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
   const [saved, setSaved] = useState(false);
 
-  // Diff by schema-field paths — those are exactly the settable leaves the PATCH endpoint
-  // accepts. A generic recursive diff would emit sub-paths of complex settings (e.g.
-  // skills.slots) that the patcher rejects as non-nested.
-  const settingsOps = (): PatchOp[] => {
-    if (!store.settingsDraft || !original) return [];
+  // Diff the draft against a baseline by schema-field paths — those are exactly the settable
+  // leaves the PATCH endpoint accepts. A generic recursive diff would emit sub-paths of complex
+  // settings (e.g. skills.slots) that the patcher rejects as non-nested. The 409 rebase path
+  // passes the fresh server settings the conflict handed back; the review display uses `original`.
+  const opsAgainst = (base: Settings | null): PatchOp[] => {
+    if (!store.settingsDraft || !base) return [];
     const ops: PatchOp[] = [];
     for (const field of schema.fields) {
       const path = fieldPath(field);
       const value = pathGet(store.settingsDraft, path);
-      if (!sameValue(value, pathGet(original, path))) ops.push({ path, value });
+      if (!sameValue(value, pathGet(base, path))) ops.push({ path, value });
     }
     return ops;
+  };
+  const settingsOps = (): PatchOp[] => opsAgainst(original);
+
+  // Apply the build-scope settings with optimistic-concurrency recovery. A 409 means the server
+  // published a change while the wizard was open (arm/disarm, profile switch, another tab). The
+  // wizard is authoritative for the fields it edits, so rebase onto the fresh settings the 409
+  // returns and retry once; a second 409 is surfaced rather than looping.
+  const applySettingsDraft = async () => {
+    let base = original;
+    let version = store.settingsVersion;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ops = opsAgainst(base);
+      if (ops.length === 0) return;
+      try {
+        const applied = await patchSettings(ops, version);
+        useWizardStore.setState({ settingsVersion: applied.version });
+        return;
+      } catch (e) {
+        if (attempt === 0 && e instanceof ApiError && e.status === 409 && e.body && typeof e.body === "object") {
+          const fresh = e.body as SettingsEnvelope;
+          base = fresh.settings;
+          version = fresh.version;
+          useWizardStore.setState({ settingsVersion: fresh.version });
+          continue;
+        }
+        throw e;
+      }
+    }
   };
 
   const save = async () => {
     setSaving(true);
     setFieldErrors([]);
     try {
-      const ops = settingsOps();
-      if (ops.length > 0) await patchSettings(ops, store.settingsVersion);
+      await applySettingsDraft();
 
       if (store.selectedMode === 4 && store.strategyDraft) {
         await saveStrategy(store.strategyDraft.identity.id, store.strategyDraft);

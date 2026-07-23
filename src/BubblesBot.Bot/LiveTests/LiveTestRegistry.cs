@@ -25,6 +25,8 @@ public static class LiveTestRegistry
         new StashCtrlClickRoundTripLiveTest(),
         new MapStashTierHoverLiveTest(),
         new MapStashSelectorRoundTripLiveTest(),
+        new StashActiveTabDiscoveryLiveTest(),
+        new StashSwitchToTargetLiveTest(),
         new AtlasNodeHoverDiscoveryLiveTest(),
         new GuardianKiracInvitationOpenLiveTest(),
         new GuardianInvitationInspectLiveTest(),

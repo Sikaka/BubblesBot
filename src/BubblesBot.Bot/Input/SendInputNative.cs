@@ -68,6 +68,33 @@ internal static class SendInputNative
         Send(inputs);
     }
 
+    /// <summary>Hold each modifier down, tap <paramref name="vk"/>, then release modifiers in
+    /// reverse order (e.g. Ctrl+Left/Right to step the active stash tab). Sent as SCAN CODES with
+    /// real inter-event timing: PoE's stash-tab hotkeys ignore synthetic virtual-key events (same
+    /// reason <see cref="ScanCodeTap"/> exists) and need the modifier established before the tap.</summary>
+    public static void ModifierKeyTap(int[] modifiers, int vk)
+    {
+        for (var i = 0; i < modifiers.Length; i++) { SendScan(modifiers[i], down: true); Thread.Sleep(15); }
+        SendScan(vk, down: true);
+        Thread.Sleep(15);
+        SendScan(vk, down: false);
+        Thread.Sleep(15);
+        for (var i = modifiers.Length - 1; i >= 0; i--) { SendScan(modifiers[i], down: false); Thread.Sleep(10); }
+    }
+
+    private static void SendScan(int vk, bool down)
+    {
+        var scan = (ushort)MapVirtualKeyW((uint)vk, 0 /* MAPVK_VK_TO_VSC */);
+        var i = new INPUT { type = INPUT_KEYBOARD };
+        i.U.ki.wScan = scan;
+        var flags = KEYEVENTF_SCANCODE | (down ? 0u : KEYEVENTF_KEYUP);
+        if (IsExtendedKey(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
+        i.U.ki.dwFlags = flags;
+        Span<INPUT> inputs = stackalloc INPUT[1];
+        inputs[0] = i;
+        Send(inputs);
+    }
+
     /// <summary>Tap a hardware scan code. Some PoE system-layer controls consume DirectInput/
     /// scan-code events while ignoring an otherwise equivalent synthetic virtual-key event.</summary>
     public static void ScanCodeTap(int scanCode)
@@ -117,9 +144,18 @@ internal static class SendInputNative
     {
         var i = new INPUT { type = INPUT_KEYBOARD };
         i.U.ki.wVk = vk;
-        i.U.ki.dwFlags = keyUp ? KEYEVENTF_KEYUP : 0u;
+        // Arrow/navigation keys are "extended" keys; without KEYEVENTF_EXTENDEDKEY the game can
+        // misread them (e.g. as numpad) or ignore them — which broke synthetic Ctrl+Arrow.
+        var flags = keyUp ? KEYEVENTF_KEYUP : 0u;
+        if (IsExtendedKey(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
+        i.U.ki.dwFlags = flags;
         return i;
     }
+
+    // Keys that require the extended-key flag when synthesized: the arrow keys, the navigation
+    // cluster (Insert, Delete, Home, End, Page Up, Page Down), and the right-hand Ctrl and Alt.
+    private static bool IsExtendedKey(int vk) => vk is
+        0x21 or 0x22 or 0x23 or 0x24 or 0x25 or 0x26 or 0x27 or 0x28 or 0x2D or 0x2E or 0xA3 or 0xA5;
 
     private static INPUT ScanCodeInput(ushort scanCode, bool keyUp)
     {
@@ -143,6 +179,7 @@ internal static class SendInputNative
     private const uint MOUSEEVENTF_XUP        = 0x0100;
     private const uint XBUTTON1               = 0x0001;
     private const uint XBUTTON2               = 0x0002;
+    private const uint KEYEVENTF_EXTENDEDKEY  = 0x0001;
     private const uint KEYEVENTF_KEYUP        = 0x0002;
     private const uint KEYEVENTF_SCANCODE     = 0x0008;
 
@@ -192,4 +229,7 @@ internal static class SendInputNative
 
     [DllImport("user32.dll")]
     private static extern unsafe uint SendInput(uint nInputs, INPUT* pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 }

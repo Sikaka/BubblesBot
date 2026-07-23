@@ -45,11 +45,15 @@ export const useWizardStore = create<WizardState>(() => ({
 
 useWizardStore.subscribe((state) => {
   try {
-    // Persist only the serializable draft (not transient step chrome would also be fine).
+    // Persist only the serializable draft. settingsVersion is deliberately NOT persisted: it is
+    // a per-process server concurrency token, not draft data. A persisted version goes stale the
+    // moment the server publishes any change (arm/disarm, profile switch, a mode's own mutation)
+    // and — because the counter resets on bot restart — a restored value can never match a fresh
+    // server again, producing a permanent 409 that survives restarting both the bot and browser.
+    // It is always re-fetched fresh on wizard mount instead (see WizardPage).
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       step: state.step,
       settingsDraft: state.settingsDraft,
-      settingsVersion: state.settingsVersion,
       strategyDraft: state.strategyDraft,
       selectedMode: state.selectedMode,
     }));

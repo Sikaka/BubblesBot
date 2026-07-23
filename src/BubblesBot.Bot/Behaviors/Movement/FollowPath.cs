@@ -65,6 +65,22 @@ public sealed class FollowPath : IBehavior
     private const double BlinkSettleMs = 400;    // wait after firing to see if we actually crossed
     private const float  BlinkSuccessMove = 4f;  // grid cells moved that counts as a successful blink
     private const int    MaxBlinkAttempts = 3;   // failed blinks at one spot before walking around
+
+    // Walk-only unstick: a build with no gap-crosser cannot blink out of a stuck spot. A single grid
+    // step is too small for PoE to register, so aim ~30 grid along a rotating heading, TAP the move
+    // key once, then check whether we actually moved. Open heading → re-path; blocked → rotate.
+    private enum NudgePhase { Idle, Waiting }
+    private NudgePhase _nudgePhase = NudgePhase.Idle;
+    private Vector2i _nudgePreCell;
+    private TimeSpan _nudgeTapAt;
+    private int _nudgeCount;
+    private int _nudgeDirIndex;
+    private const int    NudgeReachGrid = 30;    // aim well past MinAim; a single grid can't register a move
+    private const double NudgeWaitMs = 750;      // after the tap, wait this long to see if we actually moved
+    private const float  NudgeMovedGrid = 3f;    // moved >= this ⇒ the heading is open
+    private const int    MaxNudges = 8;          // one full 8-way sweep of blocked headings before failing
+    private static readonly (int X, int Y)[] NudgeDirs =
+        { (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1) };
     private const float  BlinkAimGrid = 22f;     // how far across the gap to throw the cursor
 
     private AStar? _astar;
@@ -246,6 +262,7 @@ public sealed class FollowPath : IBehavior
         // the attack idle. The ordinary navigation paths keep this opt-in disabled.
         if (_preferDashForLongTravel && ctx.Settings.RangedUseDashToClose
             && _allowGapCrossing && ctx.Settings.AllowGapCrossing && _skillBook is not null
+            && HasGapCrosser(ctx)
             // Keep one full dash inside the requested arrival ring. This prevents a dash
             // fired at 46 grids with a 45-grid standoff from landing in melee range.
             && Distance(player, goal.Value) >= goalArrival + BlinkAimGrid
@@ -257,8 +274,10 @@ public sealed class FollowPath : IBehavior
             return LastStatus = BehaviorStatus.Running;
         }
 
-        // Explicit A* blink step → run the blink state machine toward the landing cell.
-        if (step.Action == StepAction.Blink && _skillBook is not null)
+        // Explicit A* blink step → run the blink state machine toward the landing cell. (A* only
+        // emits Blink steps when a gap-crosser exists, but guard anyway so a config change mid-path
+        // can't leave a stale blink step hanging a now-walk-only build.)
+        if (step.Action == StepAction.Blink && _skillBook is not null && HasGapCrosser(ctx))
         {
             var outcome = RunBlink(ctx, player, stepGrid, $"step {_pathIndex}/{_path.Count - 1}");
             if (outcome == BlinkOutcome.Landed) _pathIndex++;          // crossed → advance past it
@@ -266,18 +285,27 @@ public sealed class FollowPath : IBehavior
             return LastStatus = BehaviorStatus.Running;
         }
 
-        // Stuck on a WALK step (ledge/blocker the static nav layer can't see), or a recovery
-        // blink already in progress → run the blink state machine to cross it.
-        if (_allowGapCrossing && ctx.Settings.AllowGapCrossing
-            && _skillBook is not null
-            && (_blinkPhase != BlinkPhase.Idle || (stuck && now >= _walkAroundUntil)))
+        // Stuck on a WALK step (ledge/blocker the static nav layer can't see), or a recovery blink
+        // already in progress. If this build actually has a gap-crosser, blink across it. Otherwise
+        // it is a walk-only build — it must NEVER wait on a blink charge that can't exist (that hangs
+        // the character in place); nudge on foot in a rotating direction to break free instead.
+        var canBlink = _allowGapCrossing && ctx.Settings.AllowGapCrossing
+            && _skillBook is not null && HasGapCrosser(ctx);
+        if (_blinkPhase != BlinkPhase.Idle || (stuck && now >= _walkAroundUntil))
         {
-            var outcome = RunBlink(ctx, player, stepGrid, $"unstick {_pathIndex}/{_path.Count - 1}");
-            if (outcome == BlinkOutcome.Landed) _progress.MarkProgress(player, now);
-            else if (outcome == BlinkOutcome.GiveUp) { BeginWalkAround(); _progress.MarkProgress(player, now); }
-            return LastStatus = BehaviorStatus.Running;
+            if (canBlink)
+            {
+                var outcome = RunBlink(ctx, player, stepGrid, $"unstick {_pathIndex}/{_path.Count - 1}");
+                if (outcome == BlinkOutcome.Landed) _progress.MarkProgress(player, now);
+                else if (outcome == BlinkOutcome.GiveUp) { BeginWalkAround(); _progress.MarkProgress(player, now); }
+                return LastStatus = BehaviorStatus.Running;
+            }
+            return LastStatus = NudgeUnstuck(ctx, player, now);
         }
 
+        // Progress is being made → clear any nudge bookkeeping and walk the planned step.
+        _nudgeCount = 0;
+        _nudgePhase = NudgePhase.Idle;
         _movement.WalkToward(stepGrid, new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live), this);
         LastDecision = $"step {_pathIndex}/{_path.Count - 1} → ({step.X},{step.Y})";
         return LastStatus = BehaviorStatus.Running;
@@ -387,6 +415,65 @@ public sealed class FollowPath : IBehavior
         _path = null; // force a walk-only recompute next tick
     }
 
+    /// <summary>True when the build has at least one gap-crossing dash bound.</summary>
+    private static bool HasGapCrosser(BehaviorContext ctx)
+    {
+        foreach (var _ in ctx.Settings.Skills.GapCrossers) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Walk-only unstick for builds with no blink. A single grid step is too small for PoE to
+    /// register, so aim ~30 grid along a rotating heading, TAP the move key once, wait
+    /// <see cref="NudgeWaitMs"/>, then check whether we moved: movement ⇒ the heading is open,
+    /// re-path from the new spot; no movement ⇒ that heading is blocked, rotate and try the next.
+    /// After <see cref="MaxNudges"/> blocked headings (a full sweep) we fail so the owner reselects
+    /// a goal. A successful move also clears the stuck flag, resuming the normal walk path.
+    /// </summary>
+    private BehaviorStatus NudgeUnstuck(BehaviorContext ctx, Vector2i player, TimeSpan now)
+    {
+        if (_nudgePhase == NudgePhase.Waiting)
+        {
+            if ((now - _nudgeTapAt).TotalMilliseconds < NudgeWaitMs)
+            {
+                LastDecision = $"unstick nudge {_nudgeCount}/{MaxNudges} — waiting to confirm movement";
+                return BehaviorStatus.Running;
+            }
+            _nudgePhase = NudgePhase.Idle;
+            if (Distance(player, _nudgePreCell) >= NudgeMovedGrid)
+            {
+                // Heading was open — we moved. Re-path from the new position and resume normally.
+                _nudgeCount = 0;
+                _path = null;
+                LastDecision = "unstick nudge broke free — re-pathing";
+                return BehaviorStatus.Running;
+            }
+            // Heading blocked (tap produced no movement) — rotate to the next heading.
+            _nudgeDirIndex = (_nudgeDirIndex + 1) % NudgeDirs.Length;
+            _nudgeCount++;
+            LastDecision = $"unstick nudge {_nudgeCount}/{MaxNudges} — heading blocked, rotating";
+            return BehaviorStatus.Running;
+        }
+
+        if (_nudgeCount >= MaxNudges)
+        {
+            _movement.Release(this);
+            _path = null;
+            _nudgeCount = 0;
+            LastDecision = "walk-only unstick exhausted — reselecting goal";
+            return BehaviorStatus.Failure;
+        }
+
+        var d = NudgeDirs[_nudgeDirIndex];
+        var target = new Vector2i { X = player.X + d.X * NudgeReachGrid, Y = player.Y + d.Y * NudgeReachGrid };
+        _movement.TapToward(target, new BehaviorContextLite(ctx.Snapshot, ctx.Input, ctx.Live), this);
+        _nudgePreCell = player;
+        _nudgeTapAt = now;
+        _nudgePhase = NudgePhase.Waiting;
+        LastDecision = $"unstick nudge {_nudgeCount}/{MaxNudges} tap dir({d.X},{d.Y}) → ({target.X},{target.Y})";
+        return BehaviorStatus.Running;
+    }
+
     /// <summary>
     /// True when the player has crossed the perpendicular plane through <paramref name="node"/>
     /// facing <paramref name="next"/> — i.e. the node is behind them along the path direction,
@@ -418,6 +505,8 @@ public sealed class FollowPath : IBehavior
         _progress.Reset();
         _blinkPhase = BlinkPhase.Idle;
         _walkAroundUntil = TimeSpan.Zero;
+        _nudgePhase = NudgePhase.Idle;
+        _nudgeCount = 0;
         LastStatus = BehaviorStatus.Failure;
     }
 
